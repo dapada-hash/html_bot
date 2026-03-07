@@ -44,7 +44,6 @@ API_KEY = (
     or read_secret("GOOGLE_API_KEY")
     or read_env("GEMINI_API_KEY")
     or read_env("GOOGLE_API_KEY")
-    or "AIzaSyDg2VtSJLkdqmNaA0llXmJ3lVpS-LodIs0"
 )
 
 TEACHER_PIN = (
@@ -1129,4 +1128,5 @@ if st.button("Submit Answer"):
                 st.session_state.challenge_correct = 0
                 st.session_state.active_domain = None
                 st.session_state.active_difficulty = None
+
                 st.info("Challenge finished.")
