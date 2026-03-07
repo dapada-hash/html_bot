@@ -44,6 +44,7 @@ API_KEY = (
     or read_secret("GOOGLE_API_KEY")
     or read_env("GEMINI_API_KEY")
     or read_env("GOOGLE_API_KEY")
+    or ""
 )
 
 TEACHER_PIN = (
@@ -156,18 +157,42 @@ def safe_int(v, default=0):
         return default
 
 def sheets_enabled() -> bool:
-    return bool(LEADERBOARD_SHEET_ID and GOOGLE_SHEETS_CREDS_JSON)
+    return bool(
+        LEADERBOARD_SHEET_ID
+        and GOOGLE_SHEETS_CREDS_JSON
+        and str(LEADERBOARD_SHEET_ID).strip()
+        and str(GOOGLE_SHEETS_CREDS_JSON).strip()
+    )
+
+def parse_google_sheets_creds(raw_value):
+    if not raw_value:
+        return None
+
+    if isinstance(raw_value, dict):
+        return raw_value
+
+    if isinstance(raw_value, str):
+        cleaned = raw_value.strip()
+
+        if cleaned.startswith("'''") and cleaned.endswith("'''"):
+            cleaned = cleaned[3:-3].strip()
+        elif cleaned.startswith('"""') and cleaned.endswith('"""'):
+            cleaned = cleaned[3:-3].strip()
+
+        return json.loads(cleaned)
+
+    raise ValueError("GOOGLE_SHEETS_CREDS_JSON must be a JSON string or dict.")
 
 # =================================================
 # GOOGLE SHEETS
 # =================================================
 @st.cache_resource
 def get_gsheet_client():
-    creds_dict = (
-        json.loads(GOOGLE_SHEETS_CREDS_JSON)
-        if isinstance(GOOGLE_SHEETS_CREDS_JSON, str)
-        else GOOGLE_SHEETS_CREDS_JSON
-    )
+    creds_dict = parse_google_sheets_creds(GOOGLE_SHEETS_CREDS_JSON)
+
+    if not creds_dict:
+        raise ValueError("Google Sheets credentials are missing.")
+
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -531,7 +556,7 @@ No extra text before the first QUESTION:
 """.strip()
 
     try:
-        if API_KEY == "YOUR_GEMINI_API_KEY_HERE" or not API_KEY.strip():
+        if not API_KEY.strip():
             raise RuntimeError("Gemini API key not set.")
         resp = get_client().models.generate_content(model=MODEL, contents=prompt)
         qs = parse_batch(resp.text or "")
@@ -618,7 +643,10 @@ if not st.session_state.player_id:
     st.warning("Enter First Name + numeric Student ID to start.")
     st.stop()
 
-lb_upsert_user(st.session_state.player_id, st.session_state.student_period)
+try:
+    lb_upsert_user(st.session_state.player_id, st.session_state.student_period)
+except Exception:
+    pass
 
 st.sidebar.divider()
 st.sidebar.header("Quiz Settings")
@@ -630,15 +658,23 @@ lu = bank_last_updated(topic, difficulty)
 if lu:
     st.sidebar.caption(f"Last teacher refill (UTC): {lu}")
 
-if sheets_enabled():
-    st.sidebar.success("✅ Persistent mode: Google Sheets")
-else:
-    st.sidebar.warning("⚠️ Local mode only. Data may reset if the app restarts.")
+try:
+    if sheets_enabled():
+        _ = get_gsheet_client()
+        st.sidebar.success("✅ Persistent mode: Google Sheets")
+    else:
+        st.sidebar.warning("⚠️ Local mode only. Data may reset if the app restarts.")
+except Exception:
+    st.sidebar.warning("⚠️ Google Sheets secret format error. Using local mode.")
 
 # =================================================
 # LEADERBOARD
 # =================================================
-lb = lb_read_all()
+try:
+    lb = lb_read_all()
+except Exception:
+    lb = []
+
 lb_sorted = sorted(lb, key=lambda r: safe_int(r.get("xp", 0)), reverse=True)
 
 st.markdown("## 🏆 Live Classroom Leaderboard")
@@ -652,18 +688,7 @@ with col_left:
     if pod[1].get("name"):
         st.markdown(
             f"""
-            <div style="
-                text-align:center;
-                background: linear-gradient(180deg, #e5e7eb, #cbd5e1);
-                padding: 18px;
-                border-radius: 18px;
-                border: 2px solid #94a3b8;
-                box-shadow: 0 6px 14px rgba(0,0,0,0.12);
-                min-height: 220px;
-                display:flex;
-                flex-direction:column;
-                justify-content:center;
-            ">
+            <div style="text-align:center;background: linear-gradient(180deg, #e5e7eb, #cbd5e1);padding: 18px;border-radius: 18px;border: 2px solid #94a3b8;box-shadow: 0 6px 14px rgba(0,0,0,0.12);min-height: 220px;display:flex;flex-direction:column;justify-content:center;">
                 <div style="font-size:48px;">🥈</div>
                 <div style="font-size:26px; font-weight:800; margin-top:4px;">#2</div>
                 <div style="font-size:22px; font-weight:700; margin-top:8px;">{pod[1]["name"]}</div>
@@ -673,44 +698,12 @@ with col_left:
             """,
             unsafe_allow_html=True
         )
-    else:
-        st.markdown(
-            """
-            <div style="
-                text-align:center;
-                background:#f1f5f9;
-                padding:18px;
-                border-radius:18px;
-                min-height:220px;
-                display:flex;
-                flex-direction:column;
-                justify-content:center;
-            ">
-                <div style="font-size:48px;">🥈</div>
-                <div style="font-size:22px; font-weight:700;">Open Spot</div>
-                <div style="font-size:18px;">0 XP</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
 
 with col_mid:
     if pod[0].get("name"):
         st.markdown(
             f"""
-            <div style="
-                text-align:center;
-                background: linear-gradient(180deg, #fde68a, #fbbf24);
-                padding: 22px;
-                border-radius: 20px;
-                border: 3px solid #d97706;
-                box-shadow: 0 10px 24px rgba(0,0,0,0.18);
-                min-height: 260px;
-                display:flex;
-                flex-direction:column;
-                justify-content:center;
-                transform: scale(1.03);
-            ">
+            <div style="text-align:center;background: linear-gradient(180deg, #fde68a, #fbbf24);padding: 22px;border-radius: 20px;border: 3px solid #d97706;box-shadow: 0 10px 24px rgba(0,0,0,0.18);min-height: 260px;display:flex;flex-direction:column;justify-content:center;transform: scale(1.03);">
                 <div style="font-size:60px;">🥇</div>
                 <div style="font-size:30px; font-weight:900; margin-top:4px;">#1</div>
                 <div style="font-size:26px; font-weight:800; margin-top:10px;">{pod[0]["name"]}</div>
@@ -721,68 +714,17 @@ with col_mid:
             """,
             unsafe_allow_html=True
         )
-    else:
-        st.markdown(
-            """
-            <div style="
-                text-align:center;
-                background:#fef3c7;
-                padding:22px;
-                border-radius:20px;
-                min-height:260px;
-                display:flex;
-                flex-direction:column;
-                justify-content:center;
-            ">
-                <div style="font-size:60px;">🥇</div>
-                <div style="font-size:24px; font-weight:800;">Open Spot</div>
-                <div style="font-size:18px;">0 XP</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
 
 with col_right:
     if pod[2].get("name"):
         st.markdown(
             f"""
-            <div style="
-                text-align:center;
-                background: linear-gradient(180deg, #d6a779, #b87333);
-                padding: 18px;
-                border-radius: 18px;
-                border: 2px solid #92400e;
-                box-shadow: 0 6px 14px rgba(0,0,0,0.12);
-                min-height: 220px;
-                display:flex;
-                flex-direction:column;
-                justify-content:center;
-            ">
+            <div style="text-align:center;background: linear-gradient(180deg, #d6a779, #b87333);padding: 18px;border-radius: 18px;border: 2px solid #92400e;box-shadow: 0 6px 14px rgba(0,0,0,0.12);min-height: 220px;display:flex;flex-direction:column;justify-content:center;">
                 <div style="font-size:48px;">🥉</div>
                 <div style="font-size:26px; font-weight:800; margin-top:4px;">#3</div>
                 <div style="font-size:22px; font-weight:700; margin-top:8px;">{pod[2]["name"]}</div>
                 <div style="font-size:20px; margin-top:8px;">{safe_int(pod[2].get("xp"))} XP</div>
                 <div style="font-size:16px; margin-top:8px;">🔥 Best streak: {safe_int(pod[2].get("best_streak"))}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown(
-            """
-            <div style="
-                text-align:center;
-                background:#f5e1d1;
-                padding:18px;
-                border-radius:18px;
-                min-height:220px;
-                display:flex;
-                flex-direction:column;
-                justify-content:center;
-            ">
-                <div style="font-size:48px;">🥉</div>
-                <div style="font-size:22px; font-weight:700;">Open Spot</div>
-                <div style="font-size:18px;">0 XP</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -869,7 +811,10 @@ st.divider()
 # =================================================
 st.markdown("## 📩 Challenges")
 
-ch_all = ch_read_all()
+try:
+    ch_all = ch_read_all()
+except Exception:
+    ch_all = []
 
 incoming = [
     c for c in ch_all
@@ -943,10 +888,9 @@ with st.sidebar.expander("🔒 Teacher Panel"):
                 qs, err = fetch_questions_from_gemini(topic, difficulty, BATCH_SIZE)
                 if qs:
                     add_to_bank(topic, difficulty, qs)
-                    st.success(f"Added {len(qs)} to shared bank.")
+                    st.success(f"Added {len(qs)} AI questions to shared bank.")
                 else:
-                    add_to_bank(topic, difficulty, [random.choice(FALLBACK_QUESTIONS) for _ in range(BATCH_SIZE)])
-                    st.warning("Gemini unavailable; added fallback.")
+                    st.warning("Gemini unavailable. No AI questions were added to the bank.")
                     if err:
                         st.error(err)
             st.session_state.is_generating = False
@@ -962,7 +906,7 @@ with st.sidebar.expander("🔒 Teacher Panel"):
                         add_to_bank(topic, difficulty, qs)
                         added += len(qs)
                     else:
-                        st.warning("Stopped early; Gemini limited.")
+                        st.warning("Stopped early. Gemini did not return AI questions.")
                         if err:
                             st.error(err)
                         break
@@ -982,12 +926,11 @@ with st.sidebar.expander("🔒 Teacher Panel"):
                         total += len(qs)
                     else:
                         failures += 1
-                        add_to_bank(dom, difficulty, [random.choice(FALLBACK_QUESTIONS) for _ in range(ALL_DOMAINS_BATCH_SIZE)])
                         if err:
                             st.error(f"{dom}: {err}")
             st.success(f"Done ✅ Added {total} AI questions.")
             if failures:
-                st.warning(f"{failures} domain(s) used fallback.")
+                st.warning(f"{failures} domain(s) did not receive AI questions.")
             st.session_state.is_generating = False
             st.rerun()
 
@@ -1128,5 +1071,4 @@ if st.button("Submit Answer"):
                 st.session_state.challenge_correct = 0
                 st.session_state.active_domain = None
                 st.session_state.active_difficulty = None
-
                 st.info("Challenge finished.")
