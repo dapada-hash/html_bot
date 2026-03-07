@@ -202,7 +202,12 @@ def get_gsheet_client():
 
 def get_ws(tab_name: str):
     gc = get_gsheet_client()
-    sh = gc.open_by_key(LEADERBOARD_SHEET_ID)
+    try:
+        sh = gc.open_by_key(LEADERBOARD_SHEET_ID)
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not open Google Sheet by key. Check sharing, sheet ID, and quota. Original error: {e}"
+        )
     return sh.worksheet(tab_name)
 
 LB_HEADER = ["name", "period", "xp", "wins", "losses", "streak", "best_streak", "last_seen_utc"]
@@ -266,6 +271,7 @@ def write_local_csv(path: str, header: list[str], rows: list[dict]):
 # =================================================
 # LEADERBOARD STORAGE API
 # =================================================
+@st.cache_data(ttl=5)
 def lb_read_all():
     if sheets_enabled():
         ensure_sheet_tabs_and_headers()
@@ -294,9 +300,11 @@ def lb_upsert_user(name: str, period: str):
                     safe_int(r.get("best_streak", 0)),
                     now_utc()
                 ]])
+                lb_read_all.clear()
                 return
 
         ws.append_row([name, period, 0, 0, 0, 0, 0, now_utc()], value_input_option="USER_ENTERED")
+        lb_read_all.clear()
         return
 
     rows = lb_read_all()
@@ -319,6 +327,7 @@ def lb_upsert_user(name: str, period: str):
             "last_seen_utc": now_utc()
         })
     write_local_csv(LOCAL_LEADERBOARD_FILE, LB_HEADER, rows)
+    lb_read_all.clear()
 
 def lb_get_user(name: str):
     for r in lb_read_all():
@@ -351,6 +360,7 @@ def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=
                     best = max(best, streak)
 
                 ws.update(f"C{idx}:H{idx}", [[xp, wins, losses, streak, best, now_utc()]])
+                lb_read_all.clear()
                 return
 
         lb_upsert_user(name, "Other")
@@ -377,10 +387,12 @@ def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=
             r["last_seen_utc"] = now_utc()
             break
     write_local_csv(LOCAL_LEADERBOARD_FILE, LB_HEADER, rows)
+    lb_read_all.clear()
 
 # =================================================
 # CHALLENGE STORAGE API
 # =================================================
+@st.cache_data(ttl=5)
 def ch_read_all():
     if sheets_enabled():
         ensure_sheet_tabs_and_headers()
@@ -392,6 +404,7 @@ def ch_write_row(row: list):
     if sheets_enabled():
         ensure_sheet_tabs_and_headers()
         get_ws("challenges").append_row(row, value_input_option="USER_ENTERED")
+        ch_read_all.clear()
         return
 
     rows = ch_read_all()
@@ -407,6 +420,7 @@ def ch_write_row(row: list):
         "opponent_score": row[8],
     })
     write_local_csv(LOCAL_CHALLENGES_FILE, CH_HEADER, rows)
+    ch_read_all.clear()
 
 def ch_update(cid: str, updates: dict):
     rows = ch_read_all()
@@ -427,6 +441,7 @@ def ch_update(cid: str, updates: dict):
                     updates.get("opponent_score", r.get("opponent_score", "")),
                 ]
                 ws.update(f"A{idx}:I{idx}", [new_row])
+                ch_read_all.clear()
                 return
         return
 
@@ -436,6 +451,7 @@ def ch_update(cid: str, updates: dict):
                 r[k] = v
             break
     write_local_csv(LOCAL_CHALLENGES_FILE, CH_HEADER, rows)
+    ch_read_all.clear()
 
 def ch_create(challenger: str, opponent: str, domain: str, difficulty: str):
     cid = f"CH{int(time.time() * 1000)}"
@@ -597,7 +613,7 @@ st.session_state.setdefault("is_generating", False)
 # AUTO REFRESH
 # =================================================
 live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=True)
-refresh_seconds = st.sidebar.selectbox("Refresh speed", [3, 5, 10], index=1)
+refresh_seconds = st.sidebar.selectbox("Refresh speed", [5, 10, 15], index=1)
 
 if live_refresh and not st.session_state.get("is_generating", False):
     st_autorefresh(interval=refresh_seconds * 1000, limit=None, key="live_refresh")
@@ -665,7 +681,7 @@ try:
     else:
         st.sidebar.warning("⚠️ Local mode only. Data may reset if the app restarts.")
 except Exception:
-    st.sidebar.warning("⚠️ Google Sheets secret format error. Using local mode.")
+    st.sidebar.warning("⚠️ Google Sheets temporarily unavailable. Using fallback behavior.")
 
 # =================================================
 # LEADERBOARD
@@ -674,6 +690,7 @@ try:
     lb = lb_read_all()
 except Exception:
     lb = []
+    st.warning("Google Sheets is temporarily unavailable.")
 
 lb_sorted = sorted(lb, key=lambda r: safe_int(r.get("xp", 0)), reverse=True)
 
@@ -789,7 +806,12 @@ st.divider()
 # =================================================
 # STUDENT STATUS
 # =================================================
-me = lb_get_user(st.session_state.player_id) or {}
+try:
+    me = lb_get_user(st.session_state.player_id) or {}
+except Exception:
+    me = {}
+    st.warning("Google Sheets is temporarily busy. Showing fallback data.")
+
 my_xp = safe_int(me.get("xp", 0))
 my_streak = safe_int(me.get("streak", 0))
 my_best = safe_int(me.get("best_streak", 0))
