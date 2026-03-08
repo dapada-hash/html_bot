@@ -349,7 +349,7 @@ def ch_write_row(row: list):
     clear_sheet_caches()
     mark_sheet_data_stale()
 
-def ch_update(cid: str, updates: dict, ch_rows: list | None = None):
+def ch_update(cid: str, updates: dict, ch_rows=None):
     rows = ch_rows if ch_rows is not None else load_challenge_rows()
     ws = get_ws("challenges")
 
@@ -494,6 +494,71 @@ No extra text before the first QUESTION:
     return [], last_err
 
 # =================================================
+# XP POPUP
+# =================================================
+def show_xp_popup():
+    popup_text = st.session_state.get("xp_popup_text", "").strip()
+    popup_kind = st.session_state.get("xp_popup_kind", "good")
+    popup_nonce = st.session_state.get("xp_popup_nonce", 0)
+
+    if not popup_text:
+        return
+
+    bg = "linear-gradient(180deg, #22c55e, #16a34a)" if popup_kind == "good" else "linear-gradient(180deg, #f59e0b, #d97706)"
+    border = "#166534" if popup_kind == "good" else "#92400e"
+
+    st.markdown(
+        f"""
+        <style>
+        @keyframes xpFloatFade-{popup_nonce} {{
+            0% {{
+                opacity: 0;
+                transform: translate(-50%, 18px) scale(0.92);
+            }}
+            12% {{
+                opacity: 1;
+                transform: translate(-50%, 0px) scale(1.02);
+            }}
+            75% {{
+                opacity: 1;
+                transform: translate(-50%, -8px) scale(1.0);
+            }}
+            100% {{
+                opacity: 0;
+                transform: translate(-50%, -28px) scale(0.96);
+            }}
+        }}
+
+        .xp-popup-{popup_nonce} {{
+            position: fixed;
+            left: 50%;
+            top: 92px;
+            transform: translateX(-50%);
+            z-index: 9999;
+            padding: 14px 22px;
+            border-radius: 18px;
+            color: white;
+            font-weight: 800;
+            font-size: 24px;
+            letter-spacing: 0.3px;
+            background: {bg};
+            border: 3px solid {border};
+            box-shadow: 0 14px 30px rgba(0,0,0,0.22);
+            animation: xpFloatFade-{popup_nonce} 2.2s ease-out forwards;
+            pointer-events: none;
+            text-align: center;
+            white-space: pre-line;
+        }}
+        </style>
+
+        <div class="xp-popup-{popup_nonce}">
+            {popup_text}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# =================================================
 # SESSION STATE
 # =================================================
 st.session_state.setdefault("score", 0)
@@ -524,6 +589,10 @@ st.session_state.setdefault("google_sheets_error", "")
 st.session_state.setdefault("leaderboard_cache", [])
 st.session_state.setdefault("challenge_cache", [])
 st.session_state.setdefault("last_sheet_sync", 0)
+
+st.session_state.setdefault("xp_popup_text", "")
+st.session_state.setdefault("xp_popup_kind", "")
+st.session_state.setdefault("xp_popup_nonce", 0)
 
 # =================================================
 # CHECK GOOGLE SHEETS
@@ -639,6 +708,8 @@ me = next(
     (r for r in lb if str(r.get("name", "")).strip().lower() == player_id_lower),
     {}
 )
+
+show_xp_popup()
 
 # =================================================
 # LEADERBOARD
@@ -1070,6 +1141,14 @@ if st.button("Submit Answer"):
                 st.code(str(e))
 
             if bonus:
+                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP\\n🔥 Streak Bonus +{bonus}"
+            else:
+                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP"
+
+            st.session_state.xp_popup_kind = "good"
+            st.session_state.xp_popup_nonce += 1
+
+            if bonus:
                 st.success(f"✅ Correct! +{XP_CORRECT} XP  🔥 Streak bonus +{bonus} XP!")
             else:
                 st.success(f"✅ Correct! +{XP_CORRECT} XP")
@@ -1080,6 +1159,10 @@ if st.button("Submit Answer"):
             except Exception as e:
                 st.warning("Could not save score to Google Sheets.")
                 st.code(str(e))
+
+            st.session_state.xp_popup_text = "❌ Streak Reset"
+            st.session_state.xp_popup_kind = "warn"
+            st.session_state.xp_popup_nonce += 1
 
             st.error(f"❌ Incorrect. Correct answer: {q['correct']}")
 
