@@ -58,7 +58,6 @@ GOOGLE_SHEETS_CREDS_JSON = read_secret("GOOGLE_SHEETS_CREDS_JSON", None)
 
 MODEL = "gemini-2.5-flash"
 
-# Safer generation sizes
 BATCH_SIZE = 25
 BANK_TARGET = 250
 BANK_CALLS = max(1, BANK_TARGET // BATCH_SIZE)
@@ -607,9 +606,6 @@ def parse_batch(raw: str):
             pass
     return questions
 
-def get_client():
-    return genai.Client(api_key=API_KEY)
-
 def fetch_questions_from_gemini(topic: str, difficulty: str, count: int):
     prompt = f"""
 You are a Certiport HTML/CSS certification exam writer.
@@ -620,9 +616,11 @@ DIFFICULTY: {difficulty}
 
 Requirements:
 - Focus strictly on this domain.
-- Certiport-style wording and realistic distractors.
+- Focus on Certiport-style HTML/CSS exam prep.
+- Use realistic distractors.
 - Include short HTML/CSS snippets when helpful.
-- Use backticks around code in answers/explanations when possible.
+- Return only multiple-choice questions.
+- Use backticks around code when useful.
 
 FORMAT (MUST MATCH EXACTLY):
 - Each question separated by a line containing ONLY: ###
@@ -639,16 +637,30 @@ EXPLANATION: ...
 No extra text before the first QUESTION:
 """.strip()
 
-    try:
-        if not API_KEY.strip():
-            raise RuntimeError("Gemini API key not set.")
-        resp = get_client().models.generate_content(model=MODEL, contents=prompt)
-        qs = parse_batch(resp.text or "")
-        if not qs:
-            raise RuntimeError("AI format error.")
-        return qs, None
-    except Exception as e:
-        return [], str(e)
+    if not API_KEY.strip():
+        return [], "Gemini API key not set."
+
+    last_err = None
+
+    for _ in range(2):
+        try:
+            client = genai.Client(api_key=API_KEY)
+            resp = client.models.generate_content(
+                model=MODEL,
+                contents=prompt
+            )
+            raw_text = getattr(resp, "text", "") or ""
+            qs = parse_batch(raw_text)
+
+            if qs:
+                return qs, None
+
+            last_err = "AI format error or empty response."
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(1)
+
+    return [], last_err
 
 # =================================================
 # SESSION STATE
