@@ -156,14 +156,6 @@ def safe_int(v, default=0):
     except Exception:
         return default
 
-def sheets_enabled() -> bool:
-    return bool(
-        LEADERBOARD_SHEET_ID
-        and GOOGLE_SHEETS_CREDS_JSON
-        and str(LEADERBOARD_SHEET_ID).strip()
-        and str(GOOGLE_SHEETS_CREDS_JSON).strip()
-    )
-
 def parse_google_sheets_creds(raw_value):
     if not raw_value:
         return None
@@ -182,6 +174,20 @@ def parse_google_sheets_creds(raw_value):
         return json.loads(cleaned)
 
     raise ValueError("GOOGLE_SHEETS_CREDS_JSON must be a JSON string or dict.")
+
+def sheets_config_present() -> bool:
+    return bool(
+        LEADERBOARD_SHEET_ID
+        and GOOGLE_SHEETS_CREDS_JSON
+        and str(LEADERBOARD_SHEET_ID).strip()
+        and str(GOOGLE_SHEETS_CREDS_JSON).strip()
+    )
+
+def sheets_enabled() -> bool:
+    return bool(
+        sheets_config_present()
+        and st.session_state.get("google_sheets_ok", False)
+    )
 
 # =================================================
 # GOOGLE SHEETS
@@ -285,36 +291,47 @@ def lb_upsert_user(name: str, period: str):
         return
 
     if sheets_enabled():
-        ensure_sheet_tabs_and_headers()
-        ws = get_ws("leaderboard")
-        rows = ws.get_all_records()
+        try:
+            ensure_sheet_tabs_and_headers()
+            ws = get_ws("leaderboard")
+            rows = ws.get_all_records()
 
-        for idx, r in enumerate(rows, start=2):
-            if str(r.get("name", "")).lower() == name.lower():
-                ws.update(f"B{idx}:H{idx}", [[
+            matches = []
+            for idx, r in enumerate(rows, start=2):
+                if str(r.get("name", "")).strip().lower() == name.lower():
+                    matches.append((idx, r))
+
+            if matches:
+                first_idx, first_row = matches[0]
+                ws.update(f"B{first_idx}:H{first_idx}", [[
                     period,
-                    safe_int(r.get("xp", 0)),
-                    safe_int(r.get("wins", 0)),
-                    safe_int(r.get("losses", 0)),
-                    safe_int(r.get("streak", 0)),
-                    safe_int(r.get("best_streak", 0)),
+                    safe_int(first_row.get("xp", 0)),
+                    safe_int(first_row.get("wins", 0)),
+                    safe_int(first_row.get("losses", 0)),
+                    safe_int(first_row.get("streak", 0)),
+                    safe_int(first_row.get("best_streak", 0)),
                     now_utc()
                 ]])
                 lb_read_all.clear()
                 return
 
-        ws.append_row([name, period, 0, 0, 0, 0, 0, now_utc()], value_input_option="USER_ENTERED")
-        lb_read_all.clear()
-        return
+            ws.append_row([name, period, 0, 0, 0, 0, 0, now_utc()], value_input_option="USER_ENTERED")
+            lb_read_all.clear()
+            return
+        except Exception:
+            st.session_state["google_sheets_ok"] = False
 
-    rows = lb_read_all()
+    ensure_local_csv(LOCAL_LEADERBOARD_FILE, LB_HEADER)
+    rows = read_local_csv(LOCAL_LEADERBOARD_FILE)
+
     found = False
     for r in rows:
-        if r["name"].lower() == name.lower():
+        if r["name"].strip().lower() == name.lower():
             r["period"] = period
             r["last_seen_utc"] = now_utc()
             found = True
             break
+
     if not found:
         rows.append({
             "name": name,
@@ -326,14 +343,30 @@ def lb_upsert_user(name: str, period: str):
             "best_streak": "0",
             "last_seen_utc": now_utc()
         })
+
     write_local_csv(LOCAL_LEADERBOARD_FILE, LB_HEADER, rows)
     lb_read_all.clear()
 
 def lb_get_user(name: str):
-    for r in lb_read_all():
-        if str(r.get("name", "")).lower() == name.lower():
-            return r
-    return None
+    name = name.strip().lower()
+    rows = lb_read_all()
+
+    matches = []
+    for r in rows:
+        if str(r.get("name", "")).strip().lower() == name:
+            matches.append(r)
+
+    if not matches:
+        return None
+
+    matches.sort(
+        key=lambda r: (
+            safe_int(r.get("xp", 0)),
+            str(r.get("last_seen_utc", ""))
+        ),
+        reverse=True
+    )
+    return matches[0]
 
 def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=0, loss_delta=0):
     name = name.strip()
@@ -341,12 +374,19 @@ def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=
         return
 
     if sheets_enabled():
-        ensure_sheet_tabs_and_headers()
-        ws = get_ws("leaderboard")
-        rows = ws.get_all_records()
+        try:
+            ensure_sheet_tabs_and_headers()
+            ws = get_ws("leaderboard")
+            rows = ws.get_all_records()
 
-        for idx, r in enumerate(rows, start=2):
-            if str(r.get("name", "")).lower() == name.lower():
+            matches = []
+            for idx, r in enumerate(rows, start=2):
+                if str(r.get("name", "")).strip().lower() == name.lower():
+                    matches.append((idx, r))
+
+            if matches:
+                first_idx, r = matches[0]
+
                 xp = safe_int(r.get("xp", 0)) + int(delta_xp)
                 wins = safe_int(r.get("wins", 0)) + int(win_delta)
                 losses = safe_int(r.get("losses", 0)) + int(loss_delta)
@@ -359,17 +399,22 @@ def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=
                     streak = max(0, streak + streak_delta)
                     best = max(best, streak)
 
-                ws.update(f"C{idx}:H{idx}", [[xp, wins, losses, streak, best, now_utc()]])
+                ws.update(f"C{first_idx}:H{first_idx}", [[xp, wins, losses, streak, best, now_utc()]])
                 lb_read_all.clear()
                 return
 
-        lb_upsert_user(name, "Other")
-        lb_add_xp_and_streak(name, delta_xp, streak_delta, win_delta, loss_delta)
-        return
+            lb_upsert_user(name, "Other")
+            lb_add_xp_and_streak(name, delta_xp, streak_delta, win_delta, loss_delta)
+            return
+        except Exception:
+            st.session_state["google_sheets_ok"] = False
 
-    rows = lb_read_all()
+    ensure_local_csv(LOCAL_LEADERBOARD_FILE, LB_HEADER)
+    rows = read_local_csv(LOCAL_LEADERBOARD_FILE)
+
+    found = False
     for r in rows:
-        if r["name"].lower() == name.lower():
+        if r["name"].strip().lower() == name.lower():
             r["xp"] = str(safe_int(r["xp"]) + int(delta_xp))
             r["wins"] = str(safe_int(r["wins"]) + int(win_delta))
             r["losses"] = str(safe_int(r["losses"]) + int(loss_delta))
@@ -385,7 +430,21 @@ def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=
             r["streak"] = str(streak)
             r["best_streak"] = str(best)
             r["last_seen_utc"] = now_utc()
+            found = True
             break
+
+    if not found:
+        rows.append({
+            "name": name,
+            "period": "Other",
+            "xp": str(int(delta_xp)),
+            "wins": str(int(win_delta)),
+            "losses": str(int(loss_delta)),
+            "streak": "0" if streak_delta == -999 else str(max(0, streak_delta)),
+            "best_streak": "0" if streak_delta == -999 else str(max(0, streak_delta)),
+            "last_seen_utc": now_utc()
+        })
+
     write_local_csv(LOCAL_LEADERBOARD_FILE, LB_HEADER, rows)
     lb_read_all.clear()
 
@@ -402,12 +461,16 @@ def ch_read_all():
 
 def ch_write_row(row: list):
     if sheets_enabled():
-        ensure_sheet_tabs_and_headers()
-        get_ws("challenges").append_row(row, value_input_option="USER_ENTERED")
-        ch_read_all.clear()
-        return
+        try:
+            ensure_sheet_tabs_and_headers()
+            get_ws("challenges").append_row(row, value_input_option="USER_ENTERED")
+            ch_read_all.clear()
+            return
+        except Exception:
+            st.session_state["google_sheets_ok"] = False
 
-    rows = ch_read_all()
+    ensure_local_csv(LOCAL_CHALLENGES_FILE, CH_HEADER)
+    rows = read_local_csv(LOCAL_CHALLENGES_FILE)
     rows.append({
         "challenge_id": row[0],
         "created_utc": row[1],
@@ -426,25 +489,29 @@ def ch_update(cid: str, updates: dict):
     rows = ch_read_all()
 
     if sheets_enabled():
-        ws = get_ws("challenges")
-        for idx, r in enumerate(rows, start=2):
-            if str(r.get("challenge_id", "")) == cid:
-                new_row = [
-                    cid,
-                    r.get("created_utc", ""),
-                    updates.get("challenger", r.get("challenger", "")),
-                    updates.get("opponent", r.get("opponent", "")),
-                    updates.get("domain", r.get("domain", "")),
-                    updates.get("difficulty", r.get("difficulty", "")),
-                    updates.get("status", r.get("status", "")),
-                    updates.get("challenger_score", r.get("challenger_score", "")),
-                    updates.get("opponent_score", r.get("opponent_score", "")),
-                ]
-                ws.update(f"A{idx}:I{idx}", [new_row])
-                ch_read_all.clear()
-                return
-        return
+        try:
+            ws = get_ws("challenges")
+            for idx, r in enumerate(rows, start=2):
+                if str(r.get("challenge_id", "")) == cid:
+                    new_row = [
+                        cid,
+                        r.get("created_utc", ""),
+                        updates.get("challenger", r.get("challenger", "")),
+                        updates.get("opponent", r.get("opponent", "")),
+                        updates.get("domain", r.get("domain", "")),
+                        updates.get("difficulty", r.get("difficulty", "")),
+                        updates.get("status", r.get("status", "")),
+                        updates.get("challenger_score", r.get("challenger_score", "")),
+                        updates.get("opponent_score", r.get("opponent_score", "")),
+                    ]
+                    ws.update(f"A{idx}:I{idx}", [new_row])
+                    ch_read_all.clear()
+                    return
+        except Exception:
+            st.session_state["google_sheets_ok"] = False
 
+    ensure_local_csv(LOCAL_CHALLENGES_FILE, CH_HEADER)
+    rows = read_local_csv(LOCAL_CHALLENGES_FILE)
     for r in rows:
         if str(r.get("challenge_id", "")) == cid:
             for k, v in updates.items():
@@ -608,6 +675,20 @@ st.session_state.setdefault("active_difficulty", None)
 
 st.session_state.setdefault("is_teacher", False)
 st.session_state.setdefault("is_generating", False)
+st.session_state.setdefault("google_sheets_ok", False)
+
+# =================================================
+# GOOGLE SHEETS STATUS CHECK
+# =================================================
+try:
+    if sheets_config_present():
+        gc = get_gsheet_client()
+        gc.open_by_key(LEADERBOARD_SHEET_ID)
+        st.session_state["google_sheets_ok"] = True
+    else:
+        st.session_state["google_sheets_ok"] = False
+except Exception:
+    st.session_state["google_sheets_ok"] = False
 
 # =================================================
 # AUTO REFRESH
@@ -674,14 +755,10 @@ lu = bank_last_updated(topic, difficulty)
 if lu:
     st.sidebar.caption(f"Last teacher refill (UTC): {lu}")
 
-try:
-    if sheets_enabled():
-        _ = get_gsheet_client()
-        st.sidebar.success("✅ Persistent mode: Google Sheets")
-    else:
-        st.sidebar.warning("⚠️ Local mode only. Data may reset if the app restarts.")
-except Exception:
-    st.sidebar.warning("⚠️ Google Sheets temporarily unavailable. Using fallback behavior.")
+if sheets_enabled():
+    st.sidebar.success("✅ Persistent mode: Google Sheets")
+else:
+    st.sidebar.warning("⚠️ Google Sheets temporarily unavailable. Using local fallback mode.")
 
 # =================================================
 # LEADERBOARD
@@ -715,6 +792,17 @@ with col_left:
             """,
             unsafe_allow_html=True
         )
+    else:
+        st.markdown(
+            """
+            <div style="text-align:center;background:#f1f5f9;padding:18px;border-radius:18px;min-height:220px;display:flex;flex-direction:column;justify-content:center;">
+                <div style="font-size:48px;">🥈</div>
+                <div style="font-size:22px; font-weight:700;">Open Spot</div>
+                <div style="font-size:18px;">0 XP</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 with col_mid:
     if pod[0].get("name"):
@@ -731,6 +819,17 @@ with col_mid:
             """,
             unsafe_allow_html=True
         )
+    else:
+        st.markdown(
+            """
+            <div style="text-align:center;background:#fef3c7;padding:22px;border-radius:20px;min-height:260px;display:flex;flex-direction:column;justify-content:center;">
+                <div style="font-size:60px;">🥇</div>
+                <div style="font-size:24px; font-weight:800;">Open Spot</div>
+                <div style="font-size:18px;">0 XP</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 with col_right:
     if pod[2].get("name"):
@@ -742,6 +841,17 @@ with col_right:
                 <div style="font-size:22px; font-weight:700; margin-top:8px;">{pod[2]["name"]}</div>
                 <div style="font-size:20px; margin-top:8px;">{safe_int(pod[2].get("xp"))} XP</div>
                 <div style="font-size:16px; margin-top:8px;">🔥 Best streak: {safe_int(pod[2].get("best_streak"))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            """
+            <div style="text-align:center;background:#f5e1d1;padding:18px;border-radius:18px;min-height:220px;display:flex;flex-direction:column;justify-content:center;">
+                <div style="font-size:48px;">🥉</div>
+                <div style="font-size:22px; font-weight:700;">Open Spot</div>
+                <div style="font-size:18px;">0 XP</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -1036,20 +1146,32 @@ if st.button("Submit Answer"):
         correct = (st.session_state.answer_choice == q["correct"])
 
         if correct:
-            me_before = lb_get_user(st.session_state.player_id) or {}
+            try:
+                me_before = lb_get_user(st.session_state.player_id) or {}
+            except Exception:
+                me_before = {}
+
             streak_before = safe_int(me_before.get("streak", 0))
             streak_after = streak_before + 1
             bonus = STREAK_BONUS_XP if streak_after % STREAK_BONUS_EVERY == 0 else 0
 
             st.session_state.score += 1
-            lb_add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
+
+            try:
+                lb_add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
+            except Exception:
+                st.warning("Google Sheets is busy. Your score update may take a moment.")
 
             if bonus:
                 st.success(f"✅ Correct! +{XP_CORRECT} XP  🔥 Streak bonus +{bonus} XP!")
             else:
                 st.success(f"✅ Correct! +{XP_CORRECT} XP")
         else:
-            lb_add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
+            try:
+                lb_add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
+            except Exception:
+                st.warning("Google Sheets is busy. Your score update may take a moment.")
+
             st.error(f"❌ Incorrect. Correct answer: {q['correct']}")
 
         st.info(q["explanation"])
