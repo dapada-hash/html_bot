@@ -59,7 +59,7 @@ GOOGLE_SHEETS_CREDS_JSON = read_secret("GOOGLE_SHEETS_CREDS_JSON", None)
 MODEL = "gemini-2.5-flash"
 
 BATCH_SIZE = 25
-BANK_TARGET = 250
+BANK_TARGET = 100
 BANK_CALLS = max(1, BANK_TARGET // BATCH_SIZE)
 ALL_DOMAINS_TARGET = 25
 ALL_DOMAINS_BATCH_SIZE = 25
@@ -1054,7 +1054,7 @@ with st.sidebar.expander("🔒 Teacher Panel"):
 
             st.session_state.is_generating = False
 
-        if st.button(f"🚀 Build {topic} ({difficulty}) bank (~{BANK_TARGET})"):
+        if st.button(f"🚀 Build {topic} ({difficulty}) bank (~100 questions)"):
             st.session_state.is_generating = True
             added = 0
             failures = []
