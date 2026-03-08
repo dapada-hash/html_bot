@@ -58,11 +58,12 @@ GOOGLE_SHEETS_CREDS_JSON = read_secret("GOOGLE_SHEETS_CREDS_JSON", None)
 
 MODEL = "gemini-2.5-flash"
 
-BATCH_SIZE = 200
-BANK_TARGET = 1000
+# Safer generation sizes
+BATCH_SIZE = 25
+BANK_TARGET = 250
 BANK_CALLS = max(1, BANK_TARGET // BATCH_SIZE)
-ALL_DOMAINS_TARGET = 100
-ALL_DOMAINS_BATCH_SIZE = 100
+ALL_DOMAINS_TARGET = 25
+ALL_DOMAINS_BATCH_SIZE = 25
 
 CHALLENGE_QUESTIONS = 5
 XP_CORRECT = 10
@@ -696,11 +697,13 @@ except Exception:
 live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=True)
 refresh_seconds = st.sidebar.selectbox("Refresh speed", [5, 10, 15], index=1)
 
-if live_refresh and not st.session_state.get("is_generating", False):
+if live_refresh and not st.session_state.get("is_generating", False) and not st.session_state.get("is_teacher", False):
     st_autorefresh(interval=refresh_seconds * 1000, limit=None, key="live_refresh")
     st.sidebar.caption(f"🔄 Refreshing every {refresh_seconds} seconds")
 elif st.session_state.get("is_generating", False):
     st.sidebar.caption("⏸ Auto-refresh paused during question generation")
+elif st.session_state.get("is_teacher", False):
+    st.sidebar.caption("⏸ Auto-refresh paused in Teacher mode")
 
 # =================================================
 # LOGIN
@@ -1004,67 +1007,104 @@ st.divider()
 with st.sidebar.expander("🔒 Teacher Panel"):
     pin_input = st.text_input("Teacher PIN", type="password")
     tc1, tc2 = st.columns(2)
+
     with tc1:
         if st.button("Unlock Teacher"):
             st.session_state.is_teacher = (pin_input == str(TEACHER_PIN))
             st.success("Teacher mode ON ✅" if st.session_state.is_teacher else "Wrong PIN ❌")
+
     with tc2:
         if st.button("Lock Teacher"):
             st.session_state.is_teacher = False
             st.info("Teacher mode OFF")
 
     if st.session_state.is_teacher:
+        status_box = st.empty()
+        progress_box = st.empty()
+        result_box = st.empty()
+
         if st.button(f"✅ Refill {topic} ({difficulty}) +{BATCH_SIZE}"):
             st.session_state.is_generating = True
-            with st.spinner("Generating questions..."):
-                qs, err = fetch_questions_from_gemini(topic, difficulty, BATCH_SIZE)
-                if qs:
-                    add_to_bank(topic, difficulty, qs)
-                    st.success(f"Added {len(qs)} AI questions to shared bank.")
-                else:
-                    st.warning("Gemini unavailable. No AI questions were added to the bank.")
-                    if err:
+            status_box.info("Generating AI questions...")
+            progress = progress_box.progress(0)
+
+            qs, err = fetch_questions_from_gemini(topic, difficulty, BATCH_SIZE)
+            progress.progress(100)
+
+            if qs:
+                add_to_bank(topic, difficulty, qs)
+                result_box.success(f"Added {len(qs)} AI questions to shared bank.")
+            else:
+                result_box.warning("Gemini unavailable. No AI questions were added.")
+                if err:
+                    with result_box.container():
                         st.error(err)
+
             st.session_state.is_generating = False
-            st.rerun()
 
         if st.button(f"🚀 Build {topic} ({difficulty}) bank (~{BANK_TARGET})"):
             st.session_state.is_generating = True
             added = 0
-            with st.spinner("Building question bank..."):
-                for _ in range(BANK_CALLS):
-                    qs, err = fetch_questions_from_gemini(topic, difficulty, BATCH_SIZE)
-                    if qs:
-                        add_to_bank(topic, difficulty, qs)
-                        added += len(qs)
-                    else:
-                        st.warning("Stopped early. Gemini did not return AI questions.")
-                        if err:
-                            st.error(err)
-                        break
-            st.success(f"Done ✅ Added {added} AI questions.")
+            failures = []
+            progress = progress_box.progress(0)
+
+            for i in range(BANK_CALLS):
+                status_box.info(f"Building bank... batch {i+1}/{BANK_CALLS}")
+                qs, err = fetch_questions_from_gemini(topic, difficulty, BATCH_SIZE)
+
+                if qs:
+                    add_to_bank(topic, difficulty, qs)
+                    added += len(qs)
+                else:
+                    failures.append(err or "Unknown Gemini error")
+                    break
+
+                progress.progress(int(((i + 1) / BANK_CALLS) * 100))
+                time.sleep(1.0)
+
+            if added:
+                result_box.success(f"Done ✅ Added {added} AI questions.")
+            else:
+                result_box.warning("No AI questions were added.")
+
+            if failures:
+                with st.expander("Show AI generation errors"):
+                    for f in failures:
+                        st.write(f)
+
             st.session_state.is_generating = False
-            st.rerun()
 
         if st.button(f"🚀 Generate {ALL_DOMAINS_TARGET} for EVERY domain ({difficulty})"):
             st.session_state.is_generating = True
             total = 0
-            failures = 0
-            with st.spinner("Generating all domains..."):
-                for dom in DOMAINS:
-                    qs, err = fetch_questions_from_gemini(dom, difficulty, ALL_DOMAINS_BATCH_SIZE)
-                    if qs:
-                        add_to_bank(dom, difficulty, qs)
-                        total += len(qs)
-                    else:
-                        failures += 1
-                        if err:
-                            st.error(f"{dom}: {err}")
-            st.success(f"Done ✅ Added {total} AI questions.")
+            failures = []
+            progress = progress_box.progress(0)
+
+            for i, dom in enumerate(DOMAINS, start=1):
+                status_box.info(f"Generating domain {i}/{len(DOMAINS)}")
+                qs, err = fetch_questions_from_gemini(dom, difficulty, ALL_DOMAINS_BATCH_SIZE)
+
+                if qs:
+                    add_to_bank(dom, difficulty, qs)
+                    total += len(qs)
+                else:
+                    failures.append(f"{dom} -> {err or 'Unknown Gemini error'}")
+
+                progress.progress(int((i / len(DOMAINS)) * 100))
+                time.sleep(1.2)
+
+            if total:
+                result_box.success(f"Done ✅ Added {total} AI questions across domains.")
+            else:
+                result_box.warning("No AI questions were added across domains.")
+
             if failures:
-                st.warning(f"{failures} domain(s) did not receive AI questions.")
+                result_box.warning(f"{len(failures)} domain(s) failed.")
+                with st.expander("Show failed domains"):
+                    for f in failures:
+                        st.write(f)
+
             st.session_state.is_generating = False
-            st.rerun()
 
         st.markdown("### Teacher View")
         st.dataframe(lb_sorted[:50], use_container_width=True, height=240)
