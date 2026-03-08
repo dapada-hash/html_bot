@@ -168,12 +168,6 @@ def sheets_config_present() -> bool:
         and str(GOOGLE_SHEETS_CREDS_JSON).strip()
     )
 
-def sheets_enabled() -> bool:
-    return bool(
-        sheets_config_present()
-        and st.session_state.get("google_sheets_ok", False)
-    )
-
 # =================================================
 # GOOGLE SHEETS
 # =================================================
@@ -195,8 +189,7 @@ def get_sheet():
     return gc.open_by_key(LEADERBOARD_SHEET_ID)
 
 def get_ws(tab_name: str):
-    sh = get_sheet()
-    return sh.worksheet(tab_name)
+    return get_sheet().worksheet(tab_name)
 
 LB_HEADER = ["name", "period", "xp", "wins", "losses", "streak", "best_streak", "last_seen_utc"]
 CH_HEADER = [
@@ -208,9 +201,6 @@ CH_HEADER = [
 ]
 
 def ensure_sheet_tabs_and_headers():
-    if not sheets_enabled():
-        return
-
     sh = get_sheet()
 
     try:
@@ -227,9 +217,6 @@ def ensure_sheet_tabs_and_headers():
     if ws2.row_values(1) != CH_HEADER:
         ws2.update("A1:I1", [CH_HEADER])
 
-# =================================================
-# GOOGLE SHEETS STATUS CHECK
-# =================================================
 def check_google_sheets():
     if not sheets_config_present():
         return False, "Missing LEADERBOARD_SHEET_ID or GOOGLE_SHEETS_CREDS_JSON in secrets."
@@ -241,24 +228,37 @@ def check_google_sheets():
     except Exception as e:
         return False, str(e)
 
+def sheets_enabled():
+    return st.session_state.get("google_sheets_ok", False)
+
 # =================================================
-# LEADERBOARD / CHALLENGES - GOOGLE SHEETS ONLY
+# ONE READ PER RERUN
 # =================================================
-@st.cache_data(ttl=5)
-def lb_read_all():
-    if not sheets_enabled():
-        return []
+@st.cache_data(ttl=20)
+def load_leaderboard_rows():
     ensure_sheet_tabs_and_headers()
     return get_ws("leaderboard").get_all_records()
 
+@st.cache_data(ttl=20)
+def load_challenge_rows():
+    ensure_sheet_tabs_and_headers()
+    return get_ws("challenges").get_all_records()
+
+def clear_sheet_caches():
+    load_leaderboard_rows.clear()
+    load_challenge_rows.clear()
+
+# =================================================
+# WRITE HELPERS
+# =================================================
 def lb_upsert_user(name: str, period: str):
     name = name.strip()
-    if not name or not sheets_enabled():
+    if not name:
         return
 
     ensure_sheet_tabs_and_headers()
     ws = get_ws("leaderboard")
-    rows = ws.get_all_records()
+    rows = load_leaderboard_rows()
 
     matches = []
     for idx, r in enumerate(rows, start=2):
@@ -279,37 +279,16 @@ def lb_upsert_user(name: str, period: str):
     else:
         ws.append_row([name, period, 0, 0, 0, 0, 0, now_utc()], value_input_option="USER_ENTERED")
 
-    lb_read_all.clear()
-
-def lb_get_user(name: str):
-    name = name.strip().lower()
-    rows = lb_read_all()
-
-    matches = []
-    for r in rows:
-        if str(r.get("name", "")).strip().lower() == name:
-            matches.append(r)
-
-    if not matches:
-        return None
-
-    matches.sort(
-        key=lambda r: (
-            safe_int(r.get("xp", 0)),
-            str(r.get("last_seen_utc", ""))
-        ),
-        reverse=True
-    )
-    return matches[0]
+    clear_sheet_caches()
 
 def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=0, loss_delta=0):
     name = name.strip()
-    if not name or not sheets_enabled():
-        raise RuntimeError("Google Sheets is not available.")
+    if not name:
+        return
 
     ensure_sheet_tabs_and_headers()
     ws = get_ws("leaderboard")
-    rows = ws.get_all_records()
+    rows = load_leaderboard_rows()
 
     matches = []
     for idx, r in enumerate(rows, start=2):
@@ -318,7 +297,7 @@ def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=
 
     if not matches:
         lb_upsert_user(name, "Other")
-        rows = ws.get_all_records()
+        rows = load_leaderboard_rows()
         for idx, r in enumerate(rows, start=2):
             if str(r.get("name", "")).strip().lower() == name.lower():
                 matches.append((idx, r))
@@ -343,27 +322,15 @@ def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=
         best = max(best, streak)
 
     ws.update(f"C{first_idx}:H{first_idx}", [[xp, wins, losses, streak, best, now_utc()]])
-    lb_read_all.clear()
-
-@st.cache_data(ttl=5)
-def ch_read_all():
-    if not sheets_enabled():
-        return []
-    ensure_sheet_tabs_and_headers()
-    return get_ws("challenges").get_all_records()
+    clear_sheet_caches()
 
 def ch_write_row(row: list):
-    if not sheets_enabled():
-        raise RuntimeError("Google Sheets is not available.")
     ensure_sheet_tabs_and_headers()
     get_ws("challenges").append_row(row, value_input_option="USER_ENTERED")
-    ch_read_all.clear()
+    clear_sheet_caches()
 
-def ch_update(cid: str, updates: dict):
-    if not sheets_enabled():
-        raise RuntimeError("Google Sheets is not available.")
-
-    rows = ch_read_all()
+def ch_update(cid: str, updates: dict, ch_rows: list | None = None):
+    rows = ch_rows if ch_rows is not None else load_challenge_rows()
     ws = get_ws("challenges")
 
     for idx, r in enumerate(rows, start=2):
@@ -380,7 +347,7 @@ def ch_update(cid: str, updates: dict):
                 updates.get("opponent_score", r.get("opponent_score", "")),
             ]
             ws.update(f"A{idx}:I{idx}", [new_row])
-            ch_read_all.clear()
+            clear_sheet_caches()
             return
 
     raise RuntimeError(f"Challenge {cid} not found.")
@@ -389,28 +356,6 @@ def ch_create(challenger: str, opponent: str, domain: str, difficulty: str):
     cid = f"CH{int(time.time() * 1000)}"
     ch_write_row([cid, now_utc(), challenger, opponent, domain, difficulty, "pending", "", ""])
     return cid
-
-def ch_finalize_if_done(cid: str):
-    for r in ch_read_all():
-        if str(r.get("challenge_id", "")) == cid and r.get("status") == "done":
-            c = r["challenger"]
-            o = r["opponent"]
-            cs = safe_int(r.get("challenger_score", 0))
-            os_ = safe_int(r.get("opponent_score", 0))
-
-            if cs > os_:
-                lb_add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
-                lb_add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
-                return f"🏆 {c} wins! ({cs} vs {os_})"
-            if os_ > cs:
-                lb_add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
-                lb_add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
-                return f"🏆 {o} wins! ({os_} vs {cs})"
-
-            lb_add_xp_and_streak(c, XP_DRAW, 0)
-            lb_add_xp_and_streak(o, XP_DRAW, 0)
-            return f"🤝 Draw! ({cs} vs {os_})"
-    return None
 
 # =================================================
 # SHARED QUESTION BANK - PER DOMAIN
@@ -566,8 +511,8 @@ st.session_state["google_sheets_error"] = google_err
 # =================================================
 # AUTO REFRESH
 # =================================================
-live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=True)
-refresh_seconds = st.sidebar.selectbox("Refresh speed", [5, 10, 15], index=1)
+live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=False)
+refresh_seconds = st.sidebar.selectbox("Refresh speed", [30, 60, 120], index=0)
 
 if live_refresh and not st.session_state.get("is_generating", False) and not st.session_state.get("is_teacher", False):
     st_autorefresh(interval=refresh_seconds * 1000, limit=None, key="live_refresh")
@@ -618,12 +563,13 @@ if not st.session_state.player_id:
 if not sheets_enabled():
     st.warning("Google Sheets is not available.")
     st.code(st.session_state.get("google_sheets_error", "Unknown Google Sheets error"))
-else:
-    try:
-        lb_upsert_user(st.session_state.player_id, st.session_state.student_period)
-    except Exception as e:
-        st.warning("Google Sheets is temporarily unavailable.")
-        st.code(str(e))
+    st.stop()
+
+try:
+    lb_upsert_user(st.session_state.player_id, st.session_state.student_period)
+except Exception as e:
+    st.warning("Could not sync your player record.")
+    st.code(str(e))
 
 st.sidebar.divider()
 st.sidebar.header("Quiz Settings")
@@ -635,23 +581,36 @@ lu = bank_last_updated(topic, difficulty)
 if lu:
     st.sidebar.caption(f"Last teacher refill (UTC): {lu}")
 
-if sheets_enabled():
-    st.sidebar.success("✅ Persistent mode: Google Sheets")
-else:
-    st.sidebar.warning("⚠️ Google Sheets unavailable")
+st.sidebar.success("✅ Persistent mode: Google Sheets")
 
 # =================================================
-# LEADERBOARD
+# SINGLE LOADS PER RERUN
 # =================================================
 try:
-    lb = lb_read_all() if sheets_enabled() else []
+    lb = load_leaderboard_rows()
 except Exception as e:
     lb = []
     st.warning("Could not load leaderboard.")
     st.code(str(e))
 
+try:
+    ch_all = load_challenge_rows()
+except Exception as e:
+    ch_all = []
+    st.warning("Could not load challenges.")
+    st.code(str(e))
+
 lb_sorted = sorted(lb, key=lambda r: safe_int(r.get("xp", 0)), reverse=True)
 
+player_id_lower = st.session_state.player_id.strip().lower()
+me = next(
+    (r for r in lb if str(r.get("name", "")).strip().lower() == player_id_lower),
+    {}
+)
+
+# =================================================
+# LEADERBOARD
+# =================================================
 st.markdown("## 🏆 Live Classroom Leaderboard")
 st.caption("Global leaderboard across all domains.")
 
@@ -774,15 +733,14 @@ for i, r in enumerate(lb_sorted[:10], start=1):
         st.markdown(f"🔥 {safe_int(r.get('streak', 0))}")
     with row_cols[4]:
         opp_name = r.get("name", "")
-        if opp_name and opp_name.lower() != st.session_state.player_id.lower():
+        if opp_name and opp_name.lower() != player_id_lower:
             if st.button("⚔️ Challenge", key=f"challenge_{opp_name}_{i}"):
-                if sheets_enabled():
-                    try:
-                        ch_create(st.session_state.player_id, opp_name, topic, difficulty)
-                        st.success(f"Challenge sent to {opp_name}!")
-                    except Exception as e:
-                        st.warning("Could not create challenge.")
-                        st.code(str(e))
+                try:
+                    ch_create(st.session_state.player_id, opp_name, topic, difficulty)
+                    st.success(f"Challenge sent to {opp_name}!")
+                except Exception as e:
+                    st.warning("Could not create challenge.")
+                    st.code(str(e))
 
 # =================================================
 # PERIOD VS PERIOD
@@ -802,11 +760,6 @@ st.divider()
 # =================================================
 # STUDENT STATUS
 # =================================================
-try:
-    me = lb_get_user(st.session_state.player_id) or {}
-except Exception:
-    me = {}
-
 my_xp = safe_int(me.get("xp", 0))
 my_streak = safe_int(me.get("streak", 0))
 my_best = safe_int(me.get("best_streak", 0))
@@ -828,20 +781,15 @@ st.divider()
 # =================================================
 st.markdown("## 📩 Challenges")
 
-try:
-    ch_all = ch_read_all() if sheets_enabled() else []
-except Exception:
-    ch_all = []
-
 incoming = [
     c for c in ch_all
-    if str(c.get("opponent", "")).lower() == st.session_state.player_id.lower()
+    if str(c.get("opponent", "")).strip().lower() == player_id_lower
     and c.get("status") in ("pending", "accepted")
 ]
 
 outgoing = [
     c for c in ch_all
-    if str(c.get("challenger", "")).lower() == st.session_state.player_id.lower()
+    if str(c.get("challenger", "")).strip().lower() == player_id_lower
     and c.get("status") in ("pending", "accepted")
 ]
 
@@ -857,7 +805,7 @@ with left:
             if c["status"] == "pending":
                 if st.button(f"Accept {c['challenge_id']}"):
                     try:
-                        ch_update(c["challenge_id"], {"status": "accepted"})
+                        ch_update(c["challenge_id"], {"status": "accepted"}, ch_all)
                         st.session_state.challenge_mode = True
                         st.session_state.challenge_id = c["challenge_id"]
                         st.session_state.challenge_count = 0
@@ -993,7 +941,19 @@ with st.sidebar.expander("🔒 Teacher Panel"):
             st.session_state.is_generating = False
 
         st.markdown("### Teacher View")
-        st.dataframe(lb_sorted[:50], use_container_width=True, height=240)
+        teacher_rows = []
+        for i, r in enumerate(lb_sorted[:50], start=1):
+            teacher_rows.append({
+                "Rank": i,
+                "name": r.get("name", ""),
+                "period": r.get("period", ""),
+                "xp": safe_int(r.get("xp", 0)),
+                "wins": safe_int(r.get("wins", 0)),
+                "losses": safe_int(r.get("losses", 0)),
+                "streak": safe_int(r.get("streak", 0)),
+                "best_streak": safe_int(r.get("best_streak", 0)),
+            })
+        st.dataframe(teacher_rows, use_container_width=True, height=240)
 
 # =================================================
 # QUESTION PICKER
@@ -1072,71 +1032,83 @@ if st.button("Submit Answer"):
         correct = (st.session_state.answer_choice == q["correct"])
 
         if correct:
-            try:
-                me_before = lb_get_user(st.session_state.player_id) or {}
-            except Exception:
-                me_before = {}
-
-            streak_before = safe_int(me_before.get("streak", 0))
+            streak_before = safe_int(me.get("streak", 0))
             streak_after = streak_before + 1
             bonus = STREAK_BONUS_XP if streak_after % STREAK_BONUS_EVERY == 0 else 0
 
             st.session_state.score += 1
 
-            if sheets_enabled():
-                try:
-                    lb_add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
-                except Exception as e:
-                    st.warning("Could not save score to Google Sheets.")
-                    st.code(str(e))
+            try:
+                lb_add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
+            except Exception as e:
+                st.warning("Could not save score to Google Sheets.")
+                st.code(str(e))
 
             if bonus:
                 st.success(f"✅ Correct! +{XP_CORRECT} XP  🔥 Streak bonus +{bonus} XP!")
             else:
                 st.success(f"✅ Correct! +{XP_CORRECT} XP")
         else:
-            if sheets_enabled():
-                try:
-                    lb_add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
-                except Exception as e:
-                    st.warning("Could not save score to Google Sheets.")
-                    st.code(str(e))
+            try:
+                lb_add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
+            except Exception as e:
+                st.warning("Could not save score to Google Sheets.")
+                st.code(str(e))
 
             st.error(f"❌ Incorrect. Correct answer: {q['correct']}")
 
         st.info(q["explanation"])
 
-        if st.session_state.challenge_mode and st.session_state.challenge_id and sheets_enabled():
+        if st.session_state.challenge_mode and st.session_state.challenge_id:
             st.session_state.challenge_count += 1
             if correct:
                 st.session_state.challenge_correct += 1
 
             if st.session_state.challenge_count >= CHALLENGE_QUESTIONS:
                 cid = st.session_state.challenge_id
-                challenge_row = None
-                for row in ch_read_all():
-                    if str(row.get("challenge_id", "")) == cid:
-                        challenge_row = row
-                        break
+                challenge_row = next(
+                    (row for row in ch_all if str(row.get("challenge_id", "")) == cid),
+                    None
+                )
 
                 if challenge_row:
                     try:
-                        if challenge_row["challenger"].lower() == st.session_state.player_id.lower():
-                            ch_update(cid, {"challenger_score": str(st.session_state.challenge_correct)})
-                        elif challenge_row["opponent"].lower() == st.session_state.player_id.lower():
-                            ch_update(cid, {"opponent_score": str(st.session_state.challenge_correct)})
+                        if challenge_row["challenger"].lower() == player_id_lower:
+                            ch_update(cid, {"challenger_score": str(st.session_state.challenge_correct)}, ch_all)
+                        elif challenge_row["opponent"].lower() == player_id_lower:
+                            ch_update(cid, {"opponent_score": str(st.session_state.challenge_correct)}, ch_all)
 
-                        refreshed = None
-                        for row in ch_read_all():
-                            if str(row.get("challenge_id", "")) == cid:
-                                refreshed = row
-                                break
+                        refreshed_rows = load_challenge_rows()
+                        refreshed = next(
+                            (row for row in refreshed_rows if str(row.get("challenge_id", "")) == cid),
+                            None
+                        )
 
                         if refreshed and refreshed.get("challenger_score") != "" and refreshed.get("opponent_score") != "":
-                            ch_update(cid, {"status": "done"})
-                            result = ch_finalize_if_done(cid)
-                            if result:
-                                st.success(result)
+                            ch_update(cid, {"status": "done"}, refreshed_rows)
+                            final_rows = load_challenge_rows()
+                            final_row = next(
+                                (row for row in final_rows if str(row.get("challenge_id", "")) == cid and row.get("status") == "done"),
+                                None
+                            )
+                            if final_row:
+                                c = final_row["challenger"]
+                                o = final_row["opponent"]
+                                cs = safe_int(final_row.get("challenger_score", 0))
+                                os_ = safe_int(final_row.get("opponent_score", 0))
+
+                                if cs > os_:
+                                    lb_add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
+                                    lb_add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
+                                    st.success(f"🏆 {c} wins! ({cs} vs {os_})")
+                                elif os_ > cs:
+                                    lb_add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
+                                    lb_add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
+                                    st.success(f"🏆 {o} wins! ({os_} vs {cs})")
+                                else:
+                                    lb_add_xp_and_streak(c, XP_DRAW, 0)
+                                    lb_add_xp_and_streak(o, XP_DRAW, 0)
+                                    st.success(f"🤝 Draw! ({cs} vs {os_})")
                         else:
                             st.success("✅ Challenge attempt submitted! Waiting for the other student.")
                     except Exception as e:
