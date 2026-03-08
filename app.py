@@ -509,21 +509,7 @@ st.session_state["google_sheets_ok"] = google_ok
 st.session_state["google_sheets_error"] = google_err
 
 # =================================================
-# AUTO REFRESH
-# =================================================
-live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=False)
-refresh_seconds = st.sidebar.selectbox("Refresh speed", [30, 60, 120], index=0)
-
-if live_refresh and not st.session_state.get("is_generating", False) and not st.session_state.get("is_teacher", False):
-    st_autorefresh(interval=refresh_seconds * 1000, limit=None, key="live_refresh")
-    st.sidebar.caption(f"🔄 Refreshing every {refresh_seconds} seconds")
-elif st.session_state.get("is_generating", False):
-    st.sidebar.caption("⏸ Auto-refresh paused during question generation")
-elif st.session_state.get("is_teacher", False):
-    st.sidebar.caption("⏸ Auto-refresh paused in Teacher mode")
-
-# =================================================
-# LOGIN
+# LOGIN / TEACHER MODE FIRST
 # =================================================
 st.sidebar.header("Student Login (FirstName-ID)")
 
@@ -555,6 +541,35 @@ st.session_state.student_period = st.sidebar.selectbox(
     if st.session_state.student_period in ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"]
     else 0
 )
+
+with st.sidebar.expander("🔒 Teacher Panel"):
+    pin_input = st.text_input("Teacher PIN", type="password")
+    tc1, tc2 = st.columns(2)
+
+    with tc1:
+        if st.button("Unlock Teacher"):
+            st.session_state.is_teacher = (pin_input == str(TEACHER_PIN))
+            st.success("Teacher mode ON ✅" if st.session_state.is_teacher else "Wrong PIN ❌")
+
+    with tc2:
+        if st.button("Lock Teacher"):
+            st.session_state.is_teacher = False
+            st.info("Teacher mode OFF")
+
+# =================================================
+# AUTO REFRESH - TEACHER ONLY
+# =================================================
+if st.session_state.get("is_teacher", False):
+    live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=False)
+    refresh_seconds = st.sidebar.selectbox("Refresh speed", [30, 60, 120], index=0)
+
+    if live_refresh and not st.session_state.get("is_generating", False):
+        st_autorefresh(interval=refresh_seconds * 1000, limit=None, key="teacher_live_refresh")
+        st.sidebar.caption(f"🔄 Teacher refresh every {refresh_seconds} seconds")
+    elif st.session_state.get("is_generating", False):
+        st.sidebar.caption("⏸ Auto-refresh paused during question generation")
+else:
+    st.sidebar.caption("Student mode: live refresh off")
 
 if not st.session_state.player_id:
     st.warning("Enter First Name + numeric Student ID to start.")
@@ -836,27 +851,18 @@ with right:
 st.divider()
 
 # =================================================
-# TEACHER PANEL
+# TEACHER PANEL CONTENT
 # =================================================
-with st.sidebar.expander("🔒 Teacher Panel"):
-    pin_input = st.text_input("Teacher PIN", type="password")
-    tc1, tc2 = st.columns(2)
+if st.session_state.is_teacher:
+    st.markdown("## 🔒 Teacher View")
 
-    with tc1:
-        if st.button("Unlock Teacher"):
-            st.session_state.is_teacher = (pin_input == str(TEACHER_PIN))
-            st.success("Teacher mode ON ✅" if st.session_state.is_teacher else "Wrong PIN ❌")
+    status_box = st.empty()
+    progress_box = st.empty()
+    result_box = st.empty()
 
-    with tc2:
-        if st.button("Lock Teacher"):
-            st.session_state.is_teacher = False
-            st.info("Teacher mode OFF")
+    t1, t2, t3 = st.columns(3)
 
-    if st.session_state.is_teacher:
-        status_box = st.empty()
-        progress_box = st.empty()
-        result_box = st.empty()
-
+    with t1:
         if st.button(f"✅ Refill {topic} ({difficulty}) +{BATCH_SIZE}"):
             st.session_state.is_generating = True
             status_box.info("Generating AI questions...")
@@ -876,6 +882,7 @@ with st.sidebar.expander("🔒 Teacher Panel"):
 
             st.session_state.is_generating = False
 
+    with t2:
         if st.button(f"🚀 Build {topic} ({difficulty}) bank (~100 questions)"):
             st.session_state.is_generating = True
             added = 0
@@ -908,6 +915,7 @@ with st.sidebar.expander("🔒 Teacher Panel"):
 
             st.session_state.is_generating = False
 
+    with t3:
         if st.button(f"🚀 Generate {ALL_DOMAINS_TARGET} for EVERY domain ({difficulty})"):
             st.session_state.is_generating = True
             total = 0
@@ -940,20 +948,19 @@ with st.sidebar.expander("🔒 Teacher Panel"):
 
             st.session_state.is_generating = False
 
-        st.markdown("### Teacher View")
-        teacher_rows = []
-        for i, r in enumerate(lb_sorted[:50], start=1):
-            teacher_rows.append({
-                "Rank": i,
-                "name": r.get("name", ""),
-                "period": r.get("period", ""),
-                "xp": safe_int(r.get("xp", 0)),
-                "wins": safe_int(r.get("wins", 0)),
-                "losses": safe_int(r.get("losses", 0)),
-                "streak": safe_int(r.get("streak", 0)),
-                "best_streak": safe_int(r.get("best_streak", 0)),
-            })
-        st.dataframe(teacher_rows, use_container_width=True, height=240)
+    teacher_rows = []
+    for i, r in enumerate(lb_sorted[:50], start=1):
+        teacher_rows.append({
+            "Rank": i,
+            "name": r.get("name", ""),
+            "period": r.get("period", ""),
+            "xp": safe_int(r.get("xp", 0)),
+            "wins": safe_int(r.get("wins", 0)),
+            "losses": safe_int(r.get("losses", 0)),
+            "streak": safe_int(r.get("streak", 0)),
+            "best_streak": safe_int(r.get("best_streak", 0)),
+        })
+    st.dataframe(teacher_rows, use_container_width=True, height=240)
 
 # =================================================
 # QUESTION PICKER
