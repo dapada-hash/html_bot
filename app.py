@@ -234,12 +234,12 @@ def sheets_enabled():
 # =================================================
 # ONE READ LAYER
 # =================================================
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=20)
 def load_leaderboard_rows():
     ensure_sheet_tabs_and_headers()
     return get_ws("leaderboard").get_all_records()
 
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=20)
 def load_challenge_rows():
     ensure_sheet_tabs_and_headers()
     return get_ws("challenges").get_all_records()
@@ -257,7 +257,7 @@ def get_leaderboard_data():
     if (
         not st.session_state.leaderboard_cache
         or not st.session_state.challenge_cache
-        or now_ts - st.session_state.last_sheet_sync > 180
+        or now_ts - st.session_state.last_sheet_sync > 60
     ):
         st.session_state.leaderboard_cache = load_leaderboard_rows()
         st.session_state.challenge_cache = load_challenge_rows()
@@ -1118,7 +1118,7 @@ if st.session_state.is_teacher:
                     failures.append(f"{dom} -> {err or 'Unknown Gemini error'}")
 
                 progress.progress(int((i / len(DOMAINS)) * 100))
-                time.sleep(1.0)
+                time.sleep(1.2)
 
             if total:
                 result_box.success(f"Done ✅ Added {total} AI questions across domains.")
