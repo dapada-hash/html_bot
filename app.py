@@ -234,12 +234,12 @@ def sheets_enabled():
 # =================================================
 # ONE READ LAYER
 # =================================================
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=180)
 def load_leaderboard_rows():
     ensure_sheet_tabs_and_headers()
     return get_ws("leaderboard").get_all_records()
 
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=180)
 def load_challenge_rows():
     ensure_sheet_tabs_and_headers()
     return get_ws("challenges").get_all_records()
@@ -257,7 +257,7 @@ def get_leaderboard_data():
     if (
         not st.session_state.leaderboard_cache
         or not st.session_state.challenge_cache
-        or now_ts - st.session_state.last_sheet_sync > 60
+        or now_ts - st.session_state.last_sheet_sync > 180
     ):
         st.session_state.leaderboard_cache = load_leaderboard_rows()
         st.session_state.challenge_cache = load_challenge_rows()
@@ -556,6 +556,101 @@ def show_xp_popup():
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+# =================================================
+# COMBO METER
+# =================================================
+def render_combo_meter(streak_value: int):
+    streak_value = max(0, int(streak_value))
+
+    if streak_value >= 10:
+        tier_label = "👑 Legendary Combo"
+        glow = "#f59e0b"
+        fill_pct = 100
+    elif streak_value >= 5:
+        tier_label = "⚡ Hot Streak"
+        glow = "#22c55e"
+        fill_pct = min(100, int((streak_value / 10) * 100))
+    elif streak_value >= 3:
+        tier_label = "🔥 Combo Active"
+        glow = "#3b82f6"
+        fill_pct = min(100, int((streak_value / 10) * 100))
+    elif streak_value >= 1:
+        tier_label = "✨ Building Combo"
+        glow = "#a855f7"
+        fill_pct = min(100, int((streak_value / 10) * 100))
+    else:
+        tier_label = "Start a combo"
+        glow = "#64748b"
+        fill_pct = 0
+
+    st.markdown(
+        f"""
+        <style>
+        .combo-wrap {{
+            margin-top: 10px;
+            margin-bottom: 8px;
+            padding: 14px 16px;
+            border-radius: 18px;
+            background: linear-gradient(180deg, #0f172a, #1e293b);
+            border: 2px solid {glow};
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.04), 0 10px 24px rgba(0,0,0,0.18);
+        }}
+        .combo-top {{
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            margin-bottom:10px;
+            color:white;
+            font-weight:800;
+            font-size:18px;
+        }}
+        .combo-badge {{
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: {glow};
+            color: white;
+            font-weight: 900;
+            font-size: 15px;
+            box-shadow: 0 0 18px {glow};
+        }}
+        .combo-track {{
+            width:100%;
+            height:16px;
+            background:#334155;
+            border-radius:999px;
+            overflow:hidden;
+        }}
+        .combo-fill {{
+            width:{fill_pct}%;
+            height:100%;
+            background: linear-gradient(90deg, {glow}, #ffffff);
+            border-radius:999px;
+            transition: width 0.4s ease;
+        }}
+        .combo-caption {{
+            margin-top:8px;
+            color:#cbd5e1;
+            font-size:14px;
+            font-weight:600;
+        }}
+        </style>
+
+        <div class="combo-wrap">
+            <div class="combo-top">
+                <div>{tier_label}</div>
+                <div class="combo-badge">Combo x{streak_value}</div>
+            </div>
+            <div class="combo-track">
+                <div class="combo-fill"></div>
+            </div>
+            <div class="combo-caption">
+                3 = 🔥 Combo • 5 = ⚡ Hot Streak • 10 = 👑 Legendary
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
 # =================================================
@@ -877,6 +972,8 @@ goal = 1000
 st.progress(min(1.0, my_xp / goal))
 st.caption(f"Race to {goal} XP")
 
+render_combo_meter(my_streak)
+
 st.divider()
 
 # =================================================
@@ -1021,7 +1118,7 @@ if st.session_state.is_teacher:
                     failures.append(f"{dom} -> {err or 'Unknown Gemini error'}")
 
                 progress.progress(int((i / len(DOMAINS)) * 100))
-                time.sleep(1.2)
+                time.sleep(1.0)
 
             if total:
                 result_box.success(f"Done ✅ Added {total} AI questions across domains.")
@@ -1141,7 +1238,7 @@ if st.button("Submit Answer"):
                 st.code(str(e))
 
             if bonus:
-                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP\\n🔥 Streak Bonus +{bonus}"
+                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP\n🔥 Streak Bonus +{bonus}"
             else:
                 st.session_state.xp_popup_text = f"+{XP_CORRECT} XP"
 
