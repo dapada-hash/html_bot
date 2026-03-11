@@ -1300,7 +1300,8 @@ if (
         st.warning("Could not save timeout result to Firebase.")
         st.code(str(e))
 
-    st.session_state.xp_popup_text = "⏰ Time Up\n❌ Streak Reset"
+    st.session_state.xp_popup_text = "⏰ Time Up
+❌ Streak Reset"
     st.session_state.xp_popup_kind = "warn"
     st.session_state.xp_popup_nonce += 1
 
