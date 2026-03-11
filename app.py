@@ -686,6 +686,10 @@ st.session_state.setdefault("answered", False)
 st.session_state.setdefault("question", None)
 st.session_state.setdefault("answer_choice", None)
 st.session_state.setdefault("next_allowed_time", 0.0)
+st.session_state.setdefault("submit_locked", False)
+st.session_state.setdefault("question_token", "")
+st.session_state.setdefault("answered_tokens", [])
+st.session_state.setdefault("last_challenge_sent_at", 0.0)
 st.session_state.setdefault("seen_by_domain", {})
 
 st.session_state.setdefault("first_name", "")
@@ -964,12 +968,16 @@ for i, r in enumerate(lb_sorted[:10], start=1):
         opp_name = r.get("name", "")
         if opp_name and opp_name.lower() != player_id_lower:
             if st.button("⚔️ Challenge", key=f"challenge_{opp_name}_{i}"):
-                try:
-                    create_challenge(st.session_state.player_id, opp_name, topic, difficulty)
-                    st.success(f"Challenge sent to {opp_name}!")
-                except Exception as e:
-                    st.warning("Could not create challenge.")
-                    st.code(str(e))
+                if time.time() - st.session_state.last_challenge_sent_at < 5:
+                    st.warning("Please wait a few seconds before sending another challenge.")
+                else:
+                    try:
+                        create_challenge(st.session_state.player_id, opp_name, topic, difficulty)
+                        st.session_state.last_challenge_sent_at = time.time()
+                        st.success(f"Challenge sent to {opp_name}!")
+                    except Exception as e:
+                        st.warning("Could not create challenge.")
+                        st.code(str(e))
 
 
 # =================================================
@@ -1218,11 +1226,13 @@ cooldown = int(max(0, st.session_state.next_allowed_time - time.time()))
 if cooldown > 0:
     st.caption(f"Cooldown: {cooldown}s")
 
-if st.button("Next Question", disabled=cooldown > 0):
-    st.session_state.next_allowed_time = time.time() + COOLDOWN_SECONDS
+if st.button("Next Question", disabled=cooldown > 0 or st.session_state.submit_locked):
+    st.session_state.next_allowed_time = time.time() + max(COOLDOWN_SECONDS, 2)
     st.session_state.question = pick_question(active_topic, active_diff)
     st.session_state.answered = False
     st.session_state.answer_choice = None
+    st.session_state.submit_locked = False
+    st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
 
 
 # =================================================
@@ -1249,12 +1259,18 @@ st.radio(
     disabled=st.session_state.answered
 )
 
-if st.button("Submit Answer"):
+if st.button("Submit Answer", disabled=st.session_state.submit_locked or st.session_state.answered):
     if st.session_state.answer_choice is None:
         st.warning("Select an answer first.")
     elif st.session_state.answered:
         st.warning("Already submitted.")
     else:
+        token = st.session_state.get("question_token", "")
+        if token and token in st.session_state.answered_tokens:
+            st.warning("This question was already submitted.")
+            st.stop()
+
+        st.session_state.submit_locked = True
         st.session_state.id_locked = True
         st.session_state.answered = True
         st.session_state.total_answered += 1
@@ -1300,6 +1316,11 @@ if st.button("Submit Answer"):
             st.session_state.xp_popup_nonce += 1
 
             st.error(f"❌ Incorrect. Correct answer: {q['correct']}")
+
+        if token:
+            st.session_state.answered_tokens = [t for t in st.session_state.answered_tokens if t != token]
+            st.session_state.answered_tokens.append(token)
+            st.session_state.answered_tokens = st.session_state.answered_tokens[-200:]
 
         st.info(q["explanation"])
 
