@@ -520,9 +520,7 @@ No extra text before the first QUESTION:
 # =================================================
 # XP POPUP
 # =================================================
-def show_xp_popup()
-if st.session_state.get("challenge_result_message"):
-    st.info(st.session_state.challenge_result_message):
+def show_xp_popup():
     popup_text = st.session_state.get("xp_popup_text", "").strip()
     popup_kind = st.session_state.get("xp_popup_kind", "good")
     popup_nonce = st.session_state.get("xp_popup_nonce", 0)
@@ -1384,7 +1382,8 @@ if (
         st.warning("Could not save timeout result to Firebase.")
         st.code(str(e))
 
-    st.session_state.xp_popup_text = "⏰ Time Up\n❌ Streak Reset"
+    st.session_state.xp_popup_text = "⏰ Time Up
+❌ Streak Reset"
     st.session_state.xp_popup_kind = "warn"
     st.session_state.xp_popup_nonce += 1
 
@@ -1400,14 +1399,12 @@ if (
         st.code(str(e))
 
     if st.session_state.challenge_mode and st.session_state.challenge_id:
-            cid = st.session_state.challenge_id
-            st.session_state.challenge_count += 1
-            if correct:
-                st.session_state.challenge_correct += 1
+        cid = st.session_state.challenge_id
+        st.session_state.challenge_count += 1
 
-            if st.session_state.challenge_count >= CHALLENGE_QUESTIONS:
-                complete_challenge_and_show_result(cid, player_id_lower)
-                st.rerun()
-            else:
-                prepare_question(active_topic, active_diff)
-                st.rerun()
+        if st.session_state.challenge_count >= CHALLENGE_QUESTIONS:
+            complete_challenge_and_show_result(cid, player_id_lower)
+            st.rerun()
+        else:
+            prepare_question(active_topic, active_diff)
+            st.rerun()
