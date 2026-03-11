@@ -777,7 +777,7 @@ with st.sidebar.expander("🔒 Teacher Panel"):
 
 
 # =================================================
-# AUTO REFRESH - TEACHER ONLY
+# AUTO REFRESH
 # =================================================
 if st.session_state.get("is_teacher", False):
     live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=False)
@@ -789,7 +789,14 @@ if st.session_state.get("is_teacher", False):
     elif st.session_state.get("is_generating", False):
         st.sidebar.caption("⏸ Auto-refresh paused during question generation")
 else:
-    st.sidebar.caption("Student mode: live refresh off")
+    student_live_refresh = st.sidebar.checkbox("Auto-refresh challenges", value=True)
+    student_refresh_seconds = st.sidebar.selectbox("Challenge refresh speed", [5, 8, 10, 15], index=1)
+
+    if student_live_refresh and not st.session_state.get("challenge_mode", False):
+        st_autorefresh(interval=student_refresh_seconds * 1000, limit=None, key="student_challenge_refresh")
+        st.sidebar.caption(f"🔄 Student refresh every {student_refresh_seconds} seconds")
+    else:
+        st.sidebar.caption("Student auto-refresh paused during active challenge")
 
 if not st.session_state.player_id:
     st.warning("Enter First Name + numeric Student ID to start.")
