@@ -64,7 +64,7 @@ ALL_DOMAINS_TARGET = 25
 ALL_DOMAINS_BATCH_SIZE = 25
 
 CHALLENGE_QUESTIONS = 5
-CHALLENGE_TOTAL_SECONDS = 150  # 2 minutes 30 seconds
+CHALLENGE_TOTAL_SECONDS = None  # timer removed for challenges
 QUESTION_TIMER_SECONDS = 15
 XP_CORRECT = 10
 XP_WRONG = 0
@@ -1059,8 +1059,15 @@ for i, r in enumerate(lb_sorted[:10], start=1):
         opp_name = r.get("name", "")
         if opp_name and opp_name.lower() != player_id_lower:
             if st.button("⚔️ Challenge", key=f"challenge_{opp_name}_{i}"):
-                if time.time() - st.session_state.last_challenge_sent_at < 5:
-                    st.warning("Please wait a few seconds before sending another challenge.")
+                # Prevent more than one active challenge at a time
+                active = any(
+                    str(c.get("challenger","")).strip().lower()==player_id_lower
+                    and c.get("status") in ("pending","accepted")
+                    for c in ch_all
+                )
+
+                if active:
+                    st.warning("You already have an active challenge. Finish it before sending another.")
                 else:
                     try:
                         create_challenge(st.session_state.player_id, opp_name, topic, difficulty)
@@ -1319,14 +1326,7 @@ active_diff = difficulty
 if st.session_state.challenge_mode and st.session_state.active_domain and st.session_state.active_difficulty:
     active_topic = st.session_state.active_domain
     active_diff = st.session_state.active_difficulty
-    elapsed = time.time() - st.session_state.challenge_start_time
-    remaining = max(0, int(CHALLENGE_TOTAL_SECONDS - elapsed))
-    minutes = remaining // 60
-    seconds = remaining % 60
-    st.info(f"⚔️ Challenge Mode: {active_topic} ({active_diff}) — Question {st.session_state.challenge_count + 1}/{CHALLENGE_QUESTIONS}")
-    st.warning(f"⏱ Challenge Timer: {minutes}:{seconds:02d}")
-    if remaining <= 0:
-        st.session_state.challenge_time_over = True
+    # Challenge timer removed — students can take their time during challenge
 
 cooldown = int(max(0, st.session_state.next_allowed_time - time.time()))
 if cooldown > 0:
