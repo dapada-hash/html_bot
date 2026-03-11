@@ -1462,5 +1462,3 @@ if st.button("Submit Answer", disabled=st.session_state.submit_locked or st.sess
             else:
                 prepare_question(active_topic, active_diff)
                 st.rerun()
-
-        # Practice mode: wait for user to click Next Question
