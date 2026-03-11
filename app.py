@@ -64,6 +64,7 @@ ALL_DOMAINS_TARGET = 25
 ALL_DOMAINS_BATCH_SIZE = 25
 
 CHALLENGE_QUESTIONS = 5
+CHALLENGE_TOTAL_SECONDS = 150  # 2 minutes 30 seconds
 QUESTION_TIMER_SECONDS = 15
 XP_CORRECT = 10
 XP_WRONG = 0
@@ -519,7 +520,9 @@ No extra text before the first QUESTION:
 # =================================================
 # XP POPUP
 # =================================================
-def show_xp_popup():
+def show_xp_popup()
+if st.session_state.get("challenge_result_message"):
+    st.info(st.session_state.challenge_result_message):
     popup_text = st.session_state.get("xp_popup_text", "").strip()
     popup_kind = st.session_state.get("xp_popup_kind", "good")
     popup_nonce = st.session_state.get("xp_popup_nonce", 0)
@@ -678,6 +681,80 @@ def render_combo_meter(streak_value: int):
     )
 
 
+def prepare_question(topic_: str, difficulty_: str):
+    st.session_state.question = pick_question(topic_, difficulty_)
+    st.session_state.answered = False
+    st.session_state.answer_choice = None
+    st.session_state.submit_locked = False
+    st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    st.session_state.question_deadline = 0.0
+    st.session_state.time_up_handled = False
+
+
+def complete_challenge_and_show_result(cid: str, player_id_lower: str):
+    try:
+        current_snap = challenge_ref(cid).get()
+        challenge_row = current_snap.to_dict() if current_snap.exists else None
+
+        if challenge_row:
+            if str(challenge_row.get("challenger", "")).strip().lower() == player_id_lower:
+                update_challenge(cid, {"challenger_score": st.session_state.challenge_correct})
+            elif str(challenge_row.get("opponent", "")).strip().lower() == player_id_lower:
+                update_challenge(cid, {"opponent_score": st.session_state.challenge_correct})
+
+            refreshed_snap = challenge_ref(cid).get()
+            refreshed = refreshed_snap.to_dict() if refreshed_snap.exists else None
+
+            if refreshed and refreshed.get("challenger_score") is not None and refreshed.get("opponent_score") is not None:
+                update_challenge(cid, {"status": "done"})
+                final_snap = challenge_ref(cid).get()
+                final_row = final_snap.to_dict() if final_snap.exists else None
+
+                if final_row:
+                    c = final_row["challenger"]
+                    o = final_row["opponent"]
+                    cs = safe_int(final_row.get("challenger_score", 0))
+                    os_ = safe_int(final_row.get("opponent_score", 0))
+
+                    if cs > os_:
+                        add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
+                        add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
+                    elif os_ > cs:
+                        add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
+                        add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
+                    else:
+                        add_xp_and_streak(c, XP_DRAW, 0)
+                        add_xp_and_streak(o, XP_DRAW, 0)
+
+                    is_challenger = str(final_row.get("challenger", "")).strip().lower() == player_id_lower
+                    my_score = cs if is_challenger else os_
+                    opp_score = os_ if is_challenger else cs
+
+                    if my_score > opp_score:
+                        st.session_state.challenge_result_message = f"🏆 You won the challenge! ({my_score} vs {opp_score})"
+                    elif my_score < opp_score:
+                        st.session_state.challenge_result_message = f"😔 You lost the challenge. ({my_score} vs {opp_score})"
+                    else:
+                        st.session_state.challenge_result_message = f"🤝 Challenge tied! ({my_score} vs {opp_score})"
+            else:
+                st.session_state.challenge_result_message = "✅ Challenge submitted! Waiting for the other student."
+    except Exception as e:
+        st.warning("Could not update challenge.")
+        st.code(str(e))
+
+    st.session_state.challenge_mode = False
+    st.session_state.challenge_id = None
+    st.session_state.challenge_count = 0
+    st.session_state.challenge_correct = 0
+    st.session_state.active_domain = None
+    st.session_state.active_difficulty = None
+    st.session_state.question = None
+    st.session_state.question_deadline = 0.0
+    st.session_state.time_up_handled = False
+    st.session_state.challenge_start_time = 0.0
+    st.session_state.challenge_time_over = False
+
+
 # =================================================
 # SESSION STATE
 # =================================================
@@ -707,6 +784,9 @@ st.session_state.setdefault("active_domain", None)
 st.session_state.setdefault("active_difficulty", None)
 st.session_state.setdefault("question_deadline", 0.0)
 st.session_state.setdefault("time_up_handled", False)
+st.session_state.setdefault("challenge_start_time", 0.0)
+st.session_state.setdefault("challenge_time_over", False)
+st.session_state.setdefault("challenge_result_message", "")
 
 st.session_state.setdefault("is_teacher", False)
 st.session_state.setdefault("is_generating", False)
@@ -1067,9 +1147,11 @@ with left:
                         st.session_state.challenge_correct = 0
                         st.session_state.active_domain = c["domain"]
                         st.session_state.active_difficulty = c["difficulty"]
-                        st.session_state.question_deadline = 0.0
-                        st.session_state.time_up_handled = False
-                        st.success("Challenge accepted!")
+                        st.session_state.challenge_start_time = time.time()
+                        st.session_state.challenge_time_over = False
+                        st.session_state.challenge_result_message = ""
+                        prepare_question(c["domain"], c["difficulty"])
+                        st.success("⚔️ Challenge started!")
                     except Exception as e:
                         st.warning("Could not accept challenge.")
                         st.code(str(e))
@@ -1088,9 +1170,11 @@ with right:
                 st.session_state.challenge_correct = 0
                 st.session_state.active_domain = c["domain"]
                 st.session_state.active_difficulty = c["difficulty"]
-                st.session_state.question_deadline = 0.0
-                st.session_state.time_up_handled = False
-                st.success("Challenge attempt started!")
+                st.session_state.challenge_start_time = time.time()
+                st.session_state.challenge_time_over = False
+                st.session_state.challenge_result_message = ""
+                prepare_question(c["domain"], c["difficulty"])
+                st.success("⚔️ Challenge started!")
 
 st.divider()
 
@@ -1237,13 +1321,20 @@ active_diff = difficulty
 if st.session_state.challenge_mode and st.session_state.active_domain and st.session_state.active_difficulty:
     active_topic = st.session_state.active_domain
     active_diff = st.session_state.active_difficulty
+    elapsed = time.time() - st.session_state.challenge_start_time
+    remaining = max(0, int(CHALLENGE_TOTAL_SECONDS - elapsed))
+    minutes = remaining // 60
+    seconds = remaining % 60
     st.info(f"⚔️ Challenge Mode: {active_topic} ({active_diff}) — Question {st.session_state.challenge_count + 1}/{CHALLENGE_QUESTIONS}")
+    st.warning(f"⏱ Challenge Timer: {minutes}:{seconds:02d}")
+    if remaining <= 0:
+        st.session_state.challenge_time_over = True
 
 cooldown = int(max(0, st.session_state.next_allowed_time - time.time()))
 if cooldown > 0:
     st.caption(f"Cooldown: {cooldown}s")
 
-if st.button("Next Question", disabled=cooldown > 0):
+if not st.session_state.challenge_mode and st.button("Next Question", disabled=cooldown > 0):
     st.session_state.next_allowed_time = time.time() + max(COOLDOWN_SECONDS, 2)
     st.session_state.question = pick_question(active_topic, active_diff)
     st.session_state.answered = False
@@ -1263,15 +1354,11 @@ if not q:
     st.info("Click **Next Question** to begin.")
     st.stop()
 
-if st.session_state.question_deadline <= 0:
-    st.session_state.question_deadline = time.time() + QUESTION_TIMER_SECONDS
-    st.session_state.time_up_handled = False
-
-seconds_left = max(0, int(st.session_state.question_deadline - time.time()))
+if st.session_state.challenge_mode and st.session_state.challenge_time_over:
+    complete_challenge_and_show_result(st.session_state.challenge_id, player_id_lower)
+    st.rerun()
 
 st.markdown("## 🧠 Question")
-if st.session_state.challenge_mode:
-    st.warning(f"⏳ Time left: {seconds_left}s")
 st.markdown(q["question"])
 st.markdown(f"**A)** {q['A']}")
 st.markdown(f"**B)** {q['B']}")
@@ -1313,211 +1400,14 @@ if (
         st.code(str(e))
 
     if st.session_state.challenge_mode and st.session_state.challenge_id:
-        st.session_state.challenge_count += 1
-
-        if st.session_state.challenge_count >= CHALLENGE_QUESTIONS:
-            try:
-                current_snap = challenge_ref(st.session_state.challenge_id).get()
-                challenge_row = current_snap.to_dict() if current_snap.exists else None
-
-                if challenge_row:
-                    if str(challenge_row.get("challenger", "")).strip().lower() == player_id_lower:
-                        update_challenge(st.session_state.challenge_id, {"challenger_score": st.session_state.challenge_correct})
-                    elif str(challenge_row.get("opponent", "")).strip().lower() == player_id_lower:
-                        update_challenge(st.session_state.challenge_id, {"opponent_score": st.session_state.challenge_correct})
-
-                    refreshed_snap = challenge_ref(st.session_state.challenge_id).get()
-                    refreshed = refreshed_snap.to_dict() if refreshed_snap.exists else None
-
-                    if refreshed and refreshed.get("challenger_score") is not None and refreshed.get("opponent_score") is not None:
-                        update_challenge(st.session_state.challenge_id, {"status": "done"})
-                        final_snap = challenge_ref(st.session_state.challenge_id).get()
-                        final_row = final_snap.to_dict() if final_snap.exists else None
-
-                        if final_row:
-                            c = final_row["challenger"]
-                            o = final_row["opponent"]
-                            cs = safe_int(final_row.get("challenger_score", 0))
-                            os_ = safe_int(final_row.get("opponent_score", 0))
-
-                            if cs > os_:
-                                add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
-                                add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
-                                st.success(f"🏆 {c} wins! ({cs} vs {os_})")
-                            elif os_ > cs:
-                                add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
-                                add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
-                                st.success(f"🏆 {o} wins! ({os_} vs {cs})")
-                            else:
-                                add_xp_and_streak(c, XP_DRAW, 0)
-                                add_xp_and_streak(o, XP_DRAW, 0)
-                                st.success(f"🤝 Draw! ({cs} vs {os_})")
-                    else:
-                        st.success("✅ Challenge attempt submitted! Waiting for the other student.")
-            except Exception as e:
-                st.warning("Could not update challenge.")
-                st.code(str(e))
-
-            st.session_state.challenge_mode = False
-            st.session_state.challenge_id = None
-            st.session_state.challenge_count = 0
-            st.session_state.challenge_correct = 0
-            st.session_state.active_domain = None
-            st.session_state.active_difficulty = None
-            st.session_state.question_deadline = 0.0
-            st.session_state.time_up_handled = False
-            st.info("Challenge finished.")
-            st.rerun()
-
-    st.session_state.question = pick_question(active_topic, active_diff)
-    st.session_state.answered = False
-    st.session_state.answer_choice = None
-    st.session_state.submit_locked = False
-    st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
-    st.session_state.question_deadline = 0.0
-    st.session_state.time_up_handled = False
-    st.rerun()
-
-st.radio(
-    "Answer",
-    ["A", "B", "C", "D"],
-    index=None,
-    horizontal=True,
-    key="answer_choice",
-    disabled=st.session_state.answered or seconds_left <= 0
-)
-
-if st.button("Submit Answer", disabled=st.session_state.submit_locked or st.session_state.answered or seconds_left <= 0):
-    if st.session_state.answer_choice is None:
-        st.warning("Select an answer first.")
-    elif st.session_state.answered:
-        st.warning("Already submitted.")
-    else:
-        token = st.session_state.get("question_token", "")
-        if token and token in st.session_state.answered_tokens:
-            st.warning("This question was already submitted.")
-            st.stop()
-
-        st.session_state.submit_locked = True
-        st.session_state.id_locked = True
-        st.session_state.answered = True
-        st.session_state.total_answered += 1
-
-        correct = (st.session_state.answer_choice == q["correct"])
-
-        if correct:
-            streak_before = safe_int(me.get("streak", 0))
-            streak_after = streak_before + 1
-            bonus = STREAK_BONUS_XP if streak_after % STREAK_BONUS_EVERY == 0 else 0
-
-            st.session_state.score += 1
-
-            try:
-                add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
-                mark_db_data_stale()
-            except Exception as e:
-                st.warning("Could not save score to Firebase.")
-                st.code(str(e))
-
-            if bonus:
-                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP\n🔥 Streak Bonus +{bonus}"
-            else:
-                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP"
-
-            st.session_state.xp_popup_kind = "good"
-            st.session_state.xp_popup_nonce += 1
-
-            if bonus:
-                st.success(f"✅ Correct! +{XP_CORRECT} XP  🔥 Streak bonus +{bonus} XP!")
-            else:
-                st.success(f"✅ Correct! +{XP_CORRECT} XP")
-        else:
-            try:
-                add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
-                mark_db_data_stale()
-            except Exception as e:
-                st.warning("Could not save score to Firebase.")
-                st.code(str(e))
-
-            st.session_state.xp_popup_text = "❌ Streak Reset"
-            st.session_state.xp_popup_kind = "warn"
-            st.session_state.xp_popup_nonce += 1
-
-            st.error(f"❌ Incorrect. Correct answer: {q['correct']}")
-
-        if token:
-            st.session_state.answered_tokens = [t for t in st.session_state.answered_tokens if t != token]
-            st.session_state.answered_tokens.append(token)
-            st.session_state.answered_tokens = st.session_state.answered_tokens[-200:]
-
-        st.info(q["explanation"])
-
-        try:
-            log_session(
-                st.session_state.first_name.strip() or st.session_state.player_id,
-                st.session_state.student_period,
-                st.session_state.score,
-                st.session_state.total_answered,
-            )
-        except Exception as e:
-            st.warning("Could not save session log to Firebase.")
-            st.code(str(e))
-
-        if st.session_state.challenge_mode and st.session_state.challenge_id:
             cid = st.session_state.challenge_id
             st.session_state.challenge_count += 1
             if correct:
                 st.session_state.challenge_correct += 1
 
             if st.session_state.challenge_count >= CHALLENGE_QUESTIONS:
-                try:
-                    current_snap = challenge_ref(cid).get()
-                    challenge_row = current_snap.to_dict() if current_snap.exists else None
-
-                    if challenge_row:
-                        if str(challenge_row.get("challenger", "")).strip().lower() == player_id_lower:
-                            update_challenge(cid, {"challenger_score": st.session_state.challenge_correct})
-                        elif str(challenge_row.get("opponent", "")).strip().lower() == player_id_lower:
-                            update_challenge(cid, {"opponent_score": st.session_state.challenge_correct})
-
-                        refreshed_snap = challenge_ref(cid).get()
-                        refreshed = refreshed_snap.to_dict() if refreshed_snap.exists else None
-
-                        if refreshed and refreshed.get("challenger_score") is not None and refreshed.get("opponent_score") is not None:
-                            update_challenge(cid, {"status": "done"})
-                            final_snap = challenge_ref(cid).get()
-                            final_row = final_snap.to_dict() if final_snap.exists else None
-
-                            if final_row:
-                                c = final_row["challenger"]
-                                o = final_row["opponent"]
-                                cs = safe_int(final_row.get("challenger_score", 0))
-                                os_ = safe_int(final_row.get("opponent_score", 0))
-
-                                if cs > os_:
-                                    add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
-                                    add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
-                                    st.success(f"🏆 {c} wins! ({cs} vs {os_})")
-                                elif os_ > cs:
-                                    add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
-                                    add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
-                                    st.success(f"🏆 {o} wins! ({os_} vs {cs})")
-                                else:
-                                    add_xp_and_streak(c, XP_DRAW, 0)
-                                    add_xp_and_streak(o, XP_DRAW, 0)
-                                    st.success(f"🤝 Draw! ({cs} vs {os_})")
-                        else:
-                            st.success("✅ Challenge attempt submitted! Waiting for the other student.")
-                except Exception as e:
-                    st.warning("Could not update challenge.")
-                    st.code(str(e))
-
-                st.session_state.challenge_mode = False
-                st.session_state.challenge_id = None
-                st.session_state.challenge_count = 0
-                st.session_state.challenge_correct = 0
-                st.session_state.active_domain = None
-                st.session_state.active_difficulty = None
-                st.session_state.question_deadline = 0.0
-                st.session_state.time_up_handled = False
-                st.info("Challenge finished.")
+                complete_challenge_and_show_result(cid, player_id_lower)
+                st.rerun()
+            else:
+                prepare_question(active_topic, active_diff)
+                st.rerun()
