@@ -521,13 +521,13 @@ No extra text before the first QUESTION:
 # XP POPUP
 # =================================================
 def show_xp_popup():
-if st.session_state.get("challenge_result_message"):
-    st.info(st.session_state.challenge_result_message):
-    popup_text = st.session_state.get("xp_popup_text", "").strip()
-    popup_kind = st.session_state.get("xp_popup_kind", "good")
-    popup_nonce = st.session_state.get("xp_popup_nonce", 0)
-
-    if not popup_text:
+    if st.session_state.get("challenge_result_message"):
+        st.info(st.session_state.challenge_result_message):
+        popup_text = st.session_state.get("xp_popup_text", "").strip()
+        popup_kind = st.session_state.get("xp_popup_kind", "good")
+        popup_nonce = st.session_state.get("xp_popup_nonce", 0)
+    
+        if not popup_text:
         return
 
     bg = "linear-gradient(180deg, #22c55e, #16a34a)" if popup_kind == "good" else "linear-gradient(180deg, #f59e0b, #d97706)"
@@ -1411,4 +1411,5 @@ if (
             else:
                 prepare_question(active_topic, active_diff)
                 st.rerun()
+
 
