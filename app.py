@@ -9,8 +9,8 @@ from datetime import datetime
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from google import genai
-import gspread
-from google.oauth2.service_account import Credentials
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # =================================================
 # PAGE CONFIG
@@ -32,8 +32,10 @@ def read_secret(key: str, default=None):
     except Exception:
         return default
 
+
 def read_env(key: str, default=None):
     return os.getenv(key, default)
+
 
 # =================================================
 # KEYS / SETTINGS
@@ -52,9 +54,7 @@ TEACHER_PIN = (
     or "1234"
 )
 
-LEADERBOARD_SHEET_ID = read_secret("LEADERBOARD_SHEET_ID", None)
-GOOGLE_SHEETS_CREDS_JSON = read_secret("GOOGLE_SHEETS_CREDS_JSON", None)
-
+FIREBASE_SERVICE_ACCOUNT_JSON = read_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
 MODEL = "gemini-2.5-flash"
 
 BATCH_SIZE = 25
@@ -137,13 +137,15 @@ FALLBACK_QUESTIONS = [
 def now_utc():
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
+
 def safe_int(v, default=0):
     try:
         return int(v)
     except Exception:
         return default
 
-def parse_google_sheets_creds(raw_value):
+
+def parse_service_account(raw_value):
     if not raw_value:
         return None
 
@@ -158,225 +160,236 @@ def parse_google_sheets_creds(raw_value):
             cleaned = cleaned[3:-3].strip()
         return json.loads(cleaned)
 
-    raise ValueError("GOOGLE_SHEETS_CREDS_JSON must be a JSON string or dict.")
+    raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON must be a JSON string or dict.")
 
-def sheets_config_present() -> bool:
-    return bool(
-        LEADERBOARD_SHEET_ID
-        and GOOGLE_SHEETS_CREDS_JSON
-        and str(LEADERBOARD_SHEET_ID).strip()
-        and str(GOOGLE_SHEETS_CREDS_JSON).strip()
-    )
+
+def firebase_config_present() -> bool:
+    return bool(FIREBASE_SERVICE_ACCOUNT_JSON and str(FIREBASE_SERVICE_ACCOUNT_JSON).strip())
+
 
 # =================================================
-# GOOGLE SHEETS
+# FIREBASE / FIRESTORE
 # =================================================
 @st.cache_resource
-def get_gsheet_client():
-    creds_dict = parse_google_sheets_creds(GOOGLE_SHEETS_CREDS_JSON)
+def get_firestore_client():
+    creds_dict = parse_service_account(FIREBASE_SERVICE_ACCOUNT_JSON)
     if not creds_dict:
-        raise ValueError("Google Sheets credentials are missing.")
+        raise ValueError("Firebase service account credentials are missing.")
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    return gspread.authorize(creds)
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(creds_dict)
+        firebase_admin.initialize_app(cred)
 
-def get_sheet():
-    gc = get_gsheet_client()
-    return gc.open_by_key(LEADERBOARD_SHEET_ID)
+    return firestore.client()
 
-def get_ws(tab_name: str):
-    return get_sheet().worksheet(tab_name)
 
-LB_HEADER = ["name", "period", "xp", "wins", "losses", "streak", "best_streak", "last_seen_utc"]
-CH_HEADER = [
-    "challenge_id", "created_utc",
-    "challenger", "opponent",
-    "domain", "difficulty",
-    "status",
-    "challenger_score", "opponent_score"
-]
-
-def ensure_sheet_tabs_and_headers():
-    sh = get_sheet()
+def check_firestore():
+    if not firebase_config_present():
+        return False, "Missing FIREBASE_SERVICE_ACCOUNT_JSON in secrets."
 
     try:
-        ws1 = sh.worksheet("leaderboard")
-    except Exception:
-        ws1 = sh.add_worksheet(title="leaderboard", rows=5000, cols=12)
-    if ws1.row_values(1) != LB_HEADER:
-        ws1.update("A1:H1", [LB_HEADER])
-
-    try:
-        ws2 = sh.worksheet("challenges")
-    except Exception:
-        ws2 = sh.add_worksheet(title="challenges", rows=5000, cols=12)
-    if ws2.row_values(1) != CH_HEADER:
-        ws2.update("A1:I1", [CH_HEADER])
-
-def check_google_sheets():
-    if not sheets_config_present():
-        return False, "Missing LEADERBOARD_SHEET_ID or GOOGLE_SHEETS_CREDS_JSON in secrets."
-
-    try:
-        gc = get_gsheet_client()
-        gc.open_by_key(LEADERBOARD_SHEET_ID)
+        db = get_firestore_client()
+        list(db.collection("players").limit(1).stream())
         return True, ""
     except Exception as e:
         return False, str(e)
 
-def sheets_enabled():
-    return st.session_state.get("google_sheets_ok", False)
+
+def db():
+    return get_firestore_client()
+
+
+def player_ref(player_id: str):
+    return db().collection("players").document(player_id)
+
+
+def session_ref():
+    return db().collection("sessions").document()
+
+
+def challenge_ref(challenge_id: str):
+    return db().collection("challenges").document(challenge_id)
+
+
+def firestore_enabled():
+    return st.session_state.get("firebase_ok", False)
+
 
 # =================================================
-# ONE READ LAYER
+# FIRESTORE READ LAYER
 # =================================================
 @st.cache_data(ttl=20)
-def load_leaderboard_rows():
-    ensure_sheet_tabs_and_headers()
-    return get_ws("leaderboard").get_all_records()
+def load_players():
+    docs = db().collection("players").stream()
+    rows = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        if "name" not in data:
+            data["name"] = doc.id
+        rows.append(data)
+    return rows
+
 
 @st.cache_data(ttl=20)
-def load_challenge_rows():
-    ensure_sheet_tabs_and_headers()
-    return get_ws("challenges").get_all_records()
+def load_challenges():
+    docs = db().collection("challenges").stream()
+    rows = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        if "challenge_id" not in data:
+            data["challenge_id"] = doc.id
+        rows.append(data)
+    return rows
 
-def clear_sheet_caches():
-    load_leaderboard_rows.clear()
-    load_challenge_rows.clear()
 
-def mark_sheet_data_stale():
-    st.session_state.last_sheet_sync = 0
+@st.cache_data(ttl=20)
+def load_sessions():
+    docs = db().collection("sessions").order_by("timestamp_utc", direction=firestore.Query.DESCENDING).limit(100).stream()
+    return [doc.to_dict() or {} for doc in docs]
 
-def get_leaderboard_data():
+
+def clear_db_caches():
+    load_players.clear()
+    load_challenges.clear()
+    load_sessions.clear()
+
+
+def mark_db_data_stale():
+    st.session_state.last_db_sync = 0
+
+
+def get_app_data():
     now_ts = time.time()
 
     if (
         not st.session_state.leaderboard_cache
         or not st.session_state.challenge_cache
-        or now_ts - st.session_state.last_sheet_sync > 60
+        or now_ts - st.session_state.last_db_sync > 20
     ):
-        st.session_state.leaderboard_cache = load_leaderboard_rows()
-        st.session_state.challenge_cache = load_challenge_rows()
-        st.session_state.last_sheet_sync = now_ts
+        st.session_state.leaderboard_cache = load_players()
+        st.session_state.challenge_cache = load_challenges()
+        st.session_state.last_db_sync = now_ts
 
     return st.session_state.leaderboard_cache, st.session_state.challenge_cache
 
+
 # =================================================
-# WRITE HELPERS
+# FIRESTORE WRITE HELPERS
 # =================================================
-def lb_upsert_user(name: str, period: str):
+def upsert_player(name: str, period: str):
     name = name.strip()
     if not name:
         return
 
-    ensure_sheet_tabs_and_headers()
-    ws = get_ws("leaderboard")
-    rows = load_leaderboard_rows()
+    ref = player_ref(name)
+    snap = ref.get()
 
-    matches = []
-    for idx, r in enumerate(rows, start=2):
-        if str(r.get("name", "")).strip().lower() == name.lower():
-            matches.append((idx, r))
-
-    if matches:
-        first_idx, first_row = matches[0]
-        ws.update(f"B{first_idx}:H{first_idx}", [[
-            period,
-            safe_int(first_row.get("xp", 0)),
-            safe_int(first_row.get("wins", 0)),
-            safe_int(first_row.get("losses", 0)),
-            safe_int(first_row.get("streak", 0)),
-            safe_int(first_row.get("best_streak", 0)),
-            now_utc()
-        ]])
+    if snap.exists:
+        data = snap.to_dict() or {}
+        ref.set({
+            "name": name,
+            "period": period,
+            "xp": safe_int(data.get("xp", 0)),
+            "wins": safe_int(data.get("wins", 0)),
+            "losses": safe_int(data.get("losses", 0)),
+            "streak": safe_int(data.get("streak", 0)),
+            "best_streak": safe_int(data.get("best_streak", 0)),
+            "last_seen_utc": now_utc(),
+        }, merge=True)
     else:
-        ws.append_row([name, period, 0, 0, 0, 0, 0, now_utc()], value_input_option="USER_ENTERED")
+        ref.set({
+            "name": name,
+            "period": period,
+            "xp": 0,
+            "wins": 0,
+            "losses": 0,
+            "streak": 0,
+            "best_streak": 0,
+            "last_seen_utc": now_utc(),
+        })
 
-    clear_sheet_caches()
-    mark_sheet_data_stale()
+    clear_db_caches()
+    mark_db_data_stale()
 
-def lb_add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=0, loss_delta=0):
+
+def add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=0, loss_delta=0):
     name = name.strip()
     if not name:
         return
 
-    ensure_sheet_tabs_and_headers()
-    ws = get_ws("leaderboard")
-    rows = load_leaderboard_rows()
+    ref = player_ref(name)
+    snap = ref.get()
 
-    matches = []
-    for idx, r in enumerate(rows, start=2):
-        if str(r.get("name", "")).strip().lower() == name.lower():
-            matches.append((idx, r))
+    if not snap.exists:
+        upsert_player(name, "Other")
+        snap = ref.get()
 
-    if not matches:
-        lb_upsert_user(name, "Other")
-        rows = load_leaderboard_rows()
-        for idx, r in enumerate(rows, start=2):
-            if str(r.get("name", "")).strip().lower() == name.lower():
-                matches.append((idx, r))
-                break
+    data = snap.to_dict() or {}
 
-    if not matches:
-        raise RuntimeError(f"Could not find or create leaderboard row for {name}.")
+    xp = safe_int(data.get("xp", 0)) + int(delta_xp)
+    wins = safe_int(data.get("wins", 0)) + int(win_delta)
+    losses = safe_int(data.get("losses", 0)) + int(loss_delta)
 
-    first_idx, r = matches[0]
-
-    xp = safe_int(r.get("xp", 0)) + int(delta_xp)
-    wins = safe_int(r.get("wins", 0)) + int(win_delta)
-    losses = safe_int(r.get("losses", 0)) + int(loss_delta)
-
-    streak = safe_int(r.get("streak", 0))
-    best = safe_int(r.get("best_streak", 0))
+    streak = safe_int(data.get("streak", 0))
+    best = safe_int(data.get("best_streak", 0))
 
     if streak_delta == -999:
         streak = 0
     else:
-        streak = max(0, streak + streak_delta)
+        streak = max(0, streak + int(streak_delta))
         best = max(best, streak)
 
-    ws.update(f"C{first_idx}:H{first_idx}", [[xp, wins, losses, streak, best, now_utc()]])
-    clear_sheet_caches()
-    mark_sheet_data_stale()
+    ref.set({
+        "name": name,
+        "period": data.get("period", "Other"),
+        "xp": xp,
+        "wins": wins,
+        "losses": losses,
+        "streak": streak,
+        "best_streak": best,
+        "last_seen_utc": now_utc(),
+    }, merge=True)
 
-def ch_write_row(row: list):
-    ensure_sheet_tabs_and_headers()
-    get_ws("challenges").append_row(row, value_input_option="USER_ENTERED")
-    clear_sheet_caches()
-    mark_sheet_data_stale()
+    clear_db_caches()
+    mark_db_data_stale()
 
-def ch_update(cid: str, updates: dict, ch_rows=None):
-    rows = ch_rows if ch_rows is not None else load_challenge_rows()
-    ws = get_ws("challenges")
 
-    for idx, r in enumerate(rows, start=2):
-        if str(r.get("challenge_id", "")) == cid:
-            new_row = [
-                cid,
-                r.get("created_utc", ""),
-                updates.get("challenger", r.get("challenger", "")),
-                updates.get("opponent", r.get("opponent", "")),
-                updates.get("domain", r.get("domain", "")),
-                updates.get("difficulty", r.get("difficulty", "")),
-                updates.get("status", r.get("status", "")),
-                updates.get("challenger_score", r.get("challenger_score", "")),
-                updates.get("opponent_score", r.get("opponent_score", "")),
-            ]
-            ws.update(f"A{idx}:I{idx}", [new_row])
-            clear_sheet_caches()
-            mark_sheet_data_stale()
-            return
+def log_session(name: str, period: str, score: int, answered: int):
+    accuracy = round((score / answered) * 100, 2) if answered else 0.0
+    session_ref().set({
+        "timestamp_utc": now_utc(),
+        "name": name,
+        "period": period,
+        "score": int(score),
+        "answered": int(answered),
+        "accuracy": accuracy,
+    })
+    clear_db_caches()
 
-    raise RuntimeError(f"Challenge {cid} not found.")
 
-def ch_create(challenger: str, opponent: str, domain: str, difficulty: str):
-    cid = f"CH{int(time.time() * 1000)}"
-    ch_write_row([cid, now_utc(), challenger, opponent, domain, difficulty, "pending", "", ""])
-    return cid
+def create_challenge(challenger: str, opponent: str, domain: str, difficulty: str):
+    ref = db().collection("challenges").document()
+    ref.set({
+        "challenge_id": ref.id,
+        "created_utc": now_utc(),
+        "challenger": challenger,
+        "opponent": opponent,
+        "domain": domain,
+        "difficulty": difficulty,
+        "status": "pending",
+        "challenger_score": None,
+        "opponent_score": None,
+    })
+    clear_db_caches()
+    mark_db_data_stale()
+    return ref.id
+
+
+def update_challenge(cid: str, updates: dict):
+    challenge_ref(cid).set(updates, merge=True)
+    clear_db_caches()
+    mark_db_data_stale()
+
 
 # =================================================
 # SHARED QUESTION BANK - PER DOMAIN
@@ -385,18 +398,23 @@ def ch_create(challenger: str, opponent: str, domain: str, difficulty: str):
 def get_shared_bank():
     return {"lock": threading.Lock(), "bank": {}, "updated": {}}
 
+
 QB = get_shared_bank()
+
 
 def qkey(topic: str, difficulty: str):
     return (topic, difficulty)
+
 
 def bank_size(topic: str, difficulty: str) -> int:
     with QB["lock"]:
         return len(QB["bank"].get(qkey(topic, difficulty), []))
 
+
 def bank_last_updated(topic: str, difficulty: str):
     with QB["lock"]:
         return QB["updated"].get(qkey(topic, difficulty))
+
 
 def add_to_bank(topic: str, difficulty: str, questions: list):
     with QB["lock"]:
@@ -404,10 +422,12 @@ def add_to_bank(topic: str, difficulty: str, questions: list):
         QB["bank"][qkey(topic, difficulty)].extend(questions)
         QB["updated"][qkey(topic, difficulty)] = now_utc()
 
+
 def get_bank(topic: str, difficulty: str):
     with QB["lock"]:
         QB["bank"].setdefault(qkey(topic, difficulty), [])
         return QB["bank"][qkey(topic, difficulty)]
+
 
 # =================================================
 # GEMINI
@@ -436,6 +456,7 @@ def parse_batch(raw: str):
         except Exception:
             pass
     return questions
+
 
 def fetch_questions_from_gemini(topic: str, difficulty: str, count: int):
     prompt = f"""
@@ -492,6 +513,7 @@ No extra text before the first QUESTION:
             time.sleep(1)
 
     return [], last_err
+
 
 # =================================================
 # XP POPUP
@@ -557,6 +579,7 @@ def show_xp_popup():
         """,
         unsafe_allow_html=True,
     )
+
 
 # =================================================
 # COMBO METER
@@ -653,6 +676,7 @@ def render_combo_meter(streak_value: int):
         unsafe_allow_html=True
     )
 
+
 # =================================================
 # SESSION STATE
 # =================================================
@@ -679,22 +703,25 @@ st.session_state.setdefault("active_difficulty", None)
 
 st.session_state.setdefault("is_teacher", False)
 st.session_state.setdefault("is_generating", False)
-st.session_state.setdefault("google_sheets_ok", False)
-st.session_state.setdefault("google_sheets_error", "")
+st.session_state.setdefault("firebase_ok", False)
+st.session_state.setdefault("firebase_error", "")
 st.session_state.setdefault("leaderboard_cache", [])
 st.session_state.setdefault("challenge_cache", [])
-st.session_state.setdefault("last_sheet_sync", 0)
+st.session_state.setdefault("last_db_sync", 0)
+st.session_state.setdefault("session_logged", False)
 
 st.session_state.setdefault("xp_popup_text", "")
 st.session_state.setdefault("xp_popup_kind", "")
 st.session_state.setdefault("xp_popup_nonce", 0)
 
+
 # =================================================
-# CHECK GOOGLE SHEETS
+# CHECK FIRESTORE
 # =================================================
-google_ok, google_err = check_google_sheets()
-st.session_state["google_sheets_ok"] = google_ok
-st.session_state["google_sheets_error"] = google_err
+firebase_ok, firebase_err = check_firestore()
+st.session_state["firebase_ok"] = firebase_ok
+st.session_state["firebase_error"] = firebase_err
+
 
 # =================================================
 # LOGIN / TEACHER MODE FIRST
@@ -744,6 +771,7 @@ with st.sidebar.expander("🔒 Teacher Panel"):
             st.session_state.is_teacher = False
             st.info("Teacher mode OFF")
 
+
 # =================================================
 # AUTO REFRESH - TEACHER ONLY
 # =================================================
@@ -763,13 +791,13 @@ if not st.session_state.player_id:
     st.warning("Enter First Name + numeric Student ID to start.")
     st.stop()
 
-if not sheets_enabled():
-    st.warning("Google Sheets is not available.")
-    st.code(st.session_state.get("google_sheets_error", "Unknown Google Sheets error"))
+if not firestore_enabled():
+    st.warning("Firebase is not available.")
+    st.code(st.session_state.get("firebase_error", "Unknown Firebase error"))
     st.stop()
 
 try:
-    lb_upsert_user(st.session_state.player_id, st.session_state.student_period)
+    upsert_player(st.session_state.player_id, st.session_state.student_period)
 except Exception as e:
     st.warning("Could not sync your player record.")
     st.code(str(e))
@@ -784,16 +812,17 @@ lu = bank_last_updated(topic, difficulty)
 if lu:
     st.sidebar.caption(f"Last teacher refill (UTC): {lu}")
 
-st.sidebar.success("✅ Persistent mode: Google Sheets")
+st.sidebar.success("✅ Persistent mode: Firebase Firestore")
+
 
 # =================================================
 # SINGLE DATA FETCH
 # =================================================
 try:
-    lb, ch_all = get_leaderboard_data()
+    lb, ch_all = get_app_data()
 except Exception as e:
     lb, ch_all = [], []
-    st.warning("Could not load Google Sheets data.")
+    st.warning("Could not load Firebase data.")
     st.code(str(e))
 
 lb_sorted = sorted(lb, key=lambda r: safe_int(r.get("xp", 0)), reverse=True)
@@ -805,6 +834,7 @@ me = next(
 )
 
 show_xp_popup()
+
 
 # =================================================
 # LEADERBOARD
@@ -912,6 +942,7 @@ for i, r in enumerate(lb_sorted[:25], start=1):
 
 st.dataframe(top_rows, use_container_width=True, height=340)
 
+
 # =================================================
 # CHALLENGE DIRECTLY FROM LEADERBOARD
 # =================================================
@@ -934,11 +965,12 @@ for i, r in enumerate(lb_sorted[:10], start=1):
         if opp_name and opp_name.lower() != player_id_lower:
             if st.button("⚔️ Challenge", key=f"challenge_{opp_name}_{i}"):
                 try:
-                    ch_create(st.session_state.player_id, opp_name, topic, difficulty)
+                    create_challenge(st.session_state.player_id, opp_name, topic, difficulty)
                     st.success(f"Challenge sent to {opp_name}!")
                 except Exception as e:
                     st.warning("Could not create challenge.")
                     st.code(str(e))
+
 
 # =================================================
 # PERIOD VS PERIOD
@@ -954,6 +986,7 @@ period_rows = [{"Period": k, "Total XP": v} for k, v in sorted(period_totals.ite
 st.dataframe(period_rows, use_container_width=True, height=220)
 
 st.divider()
+
 
 # =================================================
 # STUDENT STATUS
@@ -975,6 +1008,7 @@ st.caption(f"Race to {goal} XP")
 render_combo_meter(my_streak)
 
 st.divider()
+
 
 # =================================================
 # CHALLENGE INBOX / OUTBOX
@@ -1005,7 +1039,7 @@ with left:
             if c["status"] == "pending":
                 if st.button(f"Accept {c['challenge_id']}"):
                     try:
-                        ch_update(c["challenge_id"], {"status": "accepted"}, ch_all)
+                        update_challenge(c["challenge_id"], {"status": "accepted"})
                         st.session_state.challenge_mode = True
                         st.session_state.challenge_id = c["challenge_id"]
                         st.session_state.challenge_count = 0
@@ -1034,6 +1068,7 @@ with right:
                 st.success("Challenge attempt started!")
 
 st.divider()
+
 
 # =================================================
 # TEACHER PANEL CONTENT
@@ -1147,6 +1182,7 @@ if st.session_state.is_teacher:
         })
     st.dataframe(teacher_rows, use_container_width=True, height=240)
 
+
 # =================================================
 # QUESTION PICKER
 # =================================================
@@ -1169,6 +1205,7 @@ def pick_question(topic_: str, difficulty_: str):
 
     return random.choice(bank)
 
+
 active_topic = topic
 active_diff = difficulty
 
@@ -1186,6 +1223,7 @@ if st.button("Next Question", disabled=cooldown > 0):
     st.session_state.question = pick_question(active_topic, active_diff)
     st.session_state.answered = False
     st.session_state.answer_choice = None
+
 
 # =================================================
 # QUESTION DISPLAY
@@ -1231,10 +1269,10 @@ if st.button("Submit Answer"):
             st.session_state.score += 1
 
             try:
-                lb_add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
-                mark_sheet_data_stale()
+                add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
+                mark_db_data_stale()
             except Exception as e:
-                st.warning("Could not save score to Google Sheets.")
+                st.warning("Could not save score to Firebase.")
                 st.code(str(e))
 
             if bonus:
@@ -1251,10 +1289,10 @@ if st.button("Submit Answer"):
                 st.success(f"✅ Correct! +{XP_CORRECT} XP")
         else:
             try:
-                lb_add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
-                mark_sheet_data_stale()
+                add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
+                mark_db_data_stale()
             except Exception as e:
-                st.warning("Could not save score to Google Sheets.")
+                st.warning("Could not save score to Firebase.")
                 st.code(str(e))
 
             st.session_state.xp_popup_text = "❌ Streak Reset"
@@ -1265,40 +1303,42 @@ if st.button("Submit Answer"):
 
         st.info(q["explanation"])
 
+        try:
+            log_session(
+                st.session_state.first_name.strip() or st.session_state.player_id,
+                st.session_state.student_period,
+                st.session_state.score,
+                st.session_state.total_answered,
+            )
+        except Exception as e:
+            st.warning("Could not save session log to Firebase.")
+            st.code(str(e))
+
         if st.session_state.challenge_mode and st.session_state.challenge_id:
+            cid = st.session_state.challenge_id
             st.session_state.challenge_count += 1
             if correct:
                 st.session_state.challenge_correct += 1
 
             if st.session_state.challenge_count >= CHALLENGE_QUESTIONS:
-                cid = st.session_state.challenge_id
-                challenge_row = next(
-                    (row for row in ch_all if str(row.get("challenge_id", "")) == cid),
-                    None
-                )
+                try:
+                    current_snap = challenge_ref(cid).get()
+                    challenge_row = current_snap.to_dict() if current_snap.exists else None
 
-                if challenge_row:
-                    try:
-                        if challenge_row["challenger"].lower() == player_id_lower:
-                            ch_update(cid, {"challenger_score": str(st.session_state.challenge_correct)}, ch_all)
-                        elif challenge_row["opponent"].lower() == player_id_lower:
-                            ch_update(cid, {"opponent_score": str(st.session_state.challenge_correct)}, ch_all)
+                    if challenge_row:
+                        if str(challenge_row.get("challenger", "")).strip().lower() == player_id_lower:
+                            update_challenge(cid, {"challenger_score": st.session_state.challenge_correct})
+                        elif str(challenge_row.get("opponent", "")).strip().lower() == player_id_lower:
+                            update_challenge(cid, {"opponent_score": st.session_state.challenge_correct})
 
-                        mark_sheet_data_stale()
-                        refreshed_rows = load_challenge_rows()
-                        refreshed = next(
-                            (row for row in refreshed_rows if str(row.get("challenge_id", "")) == cid),
-                            None
-                        )
+                        refreshed_snap = challenge_ref(cid).get()
+                        refreshed = refreshed_snap.to_dict() if refreshed_snap.exists else None
 
-                        if refreshed and refreshed.get("challenger_score") != "" and refreshed.get("opponent_score") != "":
-                            ch_update(cid, {"status": "done"}, refreshed_rows)
-                            mark_sheet_data_stale()
-                            final_rows = load_challenge_rows()
-                            final_row = next(
-                                (row for row in final_rows if str(row.get("challenge_id", "")) == cid and row.get("status") == "done"),
-                                None
-                            )
+                        if refreshed and refreshed.get("challenger_score") is not None and refreshed.get("opponent_score") is not None:
+                            update_challenge(cid, {"status": "done"})
+                            final_snap = challenge_ref(cid).get()
+                            final_row = final_snap.to_dict() if final_snap.exists else None
+
                             if final_row:
                                 c = final_row["challenger"]
                                 o = final_row["opponent"]
@@ -1306,25 +1346,22 @@ if st.button("Submit Answer"):
                                 os_ = safe_int(final_row.get("opponent_score", 0))
 
                                 if cs > os_:
-                                    lb_add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
-                                    lb_add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
-                                    mark_sheet_data_stale()
+                                    add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
+                                    add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
                                     st.success(f"🏆 {c} wins! ({cs} vs {os_})")
                                 elif os_ > cs:
-                                    lb_add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
-                                    lb_add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
-                                    mark_sheet_data_stale()
+                                    add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
+                                    add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
                                     st.success(f"🏆 {o} wins! ({os_} vs {cs})")
                                 else:
-                                    lb_add_xp_and_streak(c, XP_DRAW, 0)
-                                    lb_add_xp_and_streak(o, XP_DRAW, 0)
-                                    mark_sheet_data_stale()
+                                    add_xp_and_streak(c, XP_DRAW, 0)
+                                    add_xp_and_streak(o, XP_DRAW, 0)
                                     st.success(f"🤝 Draw! ({cs} vs {os_})")
                         else:
                             st.success("✅ Challenge attempt submitted! Waiting for the other student.")
-                    except Exception as e:
-                        st.warning("Could not update challenge.")
-                        st.code(str(e))
+                except Exception as e:
+                    st.warning("Could not update challenge.")
+                    st.code(str(e))
 
                 st.session_state.challenge_mode = False
                 st.session_state.challenge_id = None
