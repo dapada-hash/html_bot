@@ -782,9 +782,9 @@ with st.sidebar.expander("🔒 Teacher Panel"):
 # =================================================
 # AUTO REFRESH
 # =================================================
-if st.session_state.get("question") and not st.session_state.get("answered", False):
+if st.session_state.get("challenge_mode", False) and st.session_state.get("question") and not st.session_state.get("answered", False):
     st_autorefresh(interval=1000, limit=None, key="question_timer_tick")
-    st.sidebar.caption("⏳ Question timer active")
+    st.sidebar.caption("⏳ Challenge timer active")
 elif st.session_state.get("is_teacher", False):
     live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=False)
     refresh_seconds = st.sidebar.selectbox("Refresh speed", [30, 60, 120], index=0)
@@ -1045,7 +1045,7 @@ incoming = [
 outgoing = [
     c for c in ch_all
     if str(c.get("challenger", "")).strip().lower() == player_id_lower
-    and c.get("status") in ("pending", "accepted")
+    and c.get("status") == "accepted"
 ]
 
 left, right = st.columns(2)
@@ -1270,7 +1270,8 @@ if st.session_state.question_deadline <= 0:
 seconds_left = max(0, int(st.session_state.question_deadline - time.time()))
 
 st.markdown("## 🧠 Question")
-st.warning(f"⏳ Time left: {seconds_left}s")
+if st.session_state.challenge_mode:
+    st.warning(f"⏳ Time left: {seconds_left}s")
 st.markdown(q["question"])
 st.markdown(f"**A)** {q['A']}")
 st.markdown(f"**B)** {q['B']}")
