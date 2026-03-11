@@ -4,7 +4,7 @@ import json
 import random
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -64,7 +64,7 @@ ALL_DOMAINS_TARGET = 25
 ALL_DOMAINS_BATCH_SIZE = 25
 
 CHALLENGE_QUESTIONS = 5
-CHALLENGE_TOTAL_SECONDS = 150  # 2 minutes 30 seconds
+CHALLENGE_TOTAL_SECONDS = 150  # 2:30 total for the whole challenge
 
 XP_CORRECT = 10
 XP_WRONG = 0
@@ -138,6 +138,15 @@ FALLBACK_QUESTIONS = [
 # =================================================
 def now_utc():
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def utc_to_ts(value) -> float:
+    try:
+        if not value:
+            return time.time()
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return time.time()
 
 
 def safe_int(v, default=0):
@@ -247,8 +256,7 @@ def load_challenges():
 @st.cache_data(ttl=20)
 def load_sessions():
     docs = db().collection("sessions").order_by(
-        "timestamp_utc",
-        direction=firestore.Query.DESCENDING
+        "timestamp_utc", direction=firestore.Query.DESCENDING
     ).limit(100).stream()
     return [doc.to_dict() or {} for doc in docs]
 
@@ -382,6 +390,7 @@ def create_challenge(challenger: str, opponent: str, domain: str, difficulty: st
         "domain": domain,
         "difficulty": difficulty,
         "status": "pending",
+        "accepted_utc": None,
         "challenger_score": None,
         "opponent_score": None,
     })
@@ -935,6 +944,41 @@ me = next(
     {}
 )
 
+# =================================================
+# AUTO-START ACCEPTED CHALLENGE FOR EITHER PLAYER
+# =================================================
+if not st.session_state.challenge_mode:
+    accepted_for_me = next(
+        (
+            c for c in ch_all
+            if c.get("status") == "accepted"
+            and (
+                (
+                    str(c.get("challenger", "")).strip().lower() == player_id_lower
+                    and c.get("challenger_score") is None
+                )
+                or (
+                    str(c.get("opponent", "")).strip().lower() == player_id_lower
+                    and c.get("opponent_score") is None
+                )
+            )
+        ),
+        None
+    )
+
+    if accepted_for_me:
+        st.session_state.challenge_mode = True
+        st.session_state.challenge_id = accepted_for_me["challenge_id"]
+        st.session_state.challenge_count = 0
+        st.session_state.challenge_correct = 0
+        st.session_state.active_domain = accepted_for_me["domain"]
+        st.session_state.active_difficulty = accepted_for_me["difficulty"]
+        st.session_state.challenge_start_time = utc_to_ts(accepted_for_me.get("accepted_utc"))
+        st.session_state.challenge_time_over = False
+        st.session_state.challenge_result_message = ""
+        prepare_question(accepted_for_me["domain"], accepted_for_me["difficulty"])
+        st.rerun()
+
 show_xp_popup()
 if st.session_state.get("challenge_result_message"):
     st.info(st.session_state.challenge_result_message)
@@ -1127,7 +1171,7 @@ incoming = [
 outgoing = [
     c for c in ch_all
     if str(c.get("challenger", "")).strip().lower() == player_id_lower
-    and c.get("status") == "accepted"
+    and c.get("status") in ("pending", "accepted")
 ]
 
 left, right = st.columns(2)
@@ -1142,14 +1186,15 @@ with left:
             if c["status"] == "pending":
                 if st.button(f"Accept {c['challenge_id']}"):
                     try:
-                        update_challenge(c["challenge_id"], {"status": "accepted"})
+                        accepted_utc = now_utc()
+                        update_challenge(c["challenge_id"], {"status": "accepted", "accepted_utc": accepted_utc})
                         st.session_state.challenge_mode = True
                         st.session_state.challenge_id = c["challenge_id"]
                         st.session_state.challenge_count = 0
                         st.session_state.challenge_correct = 0
                         st.session_state.active_domain = c["domain"]
                         st.session_state.active_difficulty = c["difficulty"]
-                        st.session_state.challenge_start_time = time.time()
+                        st.session_state.challenge_start_time = utc_to_ts(accepted_utc)
                         st.session_state.challenge_time_over = False
                         st.session_state.challenge_result_message = ""
                         prepare_question(c["domain"], c["difficulty"])
@@ -1158,27 +1203,20 @@ with left:
                     except Exception as e:
                         st.warning("Could not accept challenge.")
                         st.code(str(e))
+            else:
+                st.caption("Already accepted. Starting automatically.")
 
 with right:
     st.markdown("### Sent")
     if not outgoing:
-        st.caption("No accepted challenges yet.")
+        st.caption("No active sent challenges.")
     else:
         for c in outgoing[:10]:
             st.write(f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`")
-            if st.button(f"Start {c['challenge_id']}"):
-                st.session_state.challenge_mode = True
-                st.session_state.challenge_id = c["challenge_id"]
-                st.session_state.challenge_count = 0
-                st.session_state.challenge_correct = 0
-                st.session_state.active_domain = c["domain"]
-                st.session_state.active_difficulty = c["difficulty"]
-                st.session_state.challenge_start_time = time.time()
-                st.session_state.challenge_time_over = False
-                st.session_state.challenge_result_message = ""
-                prepare_question(c["domain"], c["difficulty"])
-                st.success("⚔️ Challenge started!")
-                st.rerun()
+            if c["status"] == "pending":
+                st.caption("Waiting for the other student to accept.")
+            else:
+                st.caption("Accepted. Starts automatically for both players.")
 
 st.divider()
 
