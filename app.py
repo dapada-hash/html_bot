@@ -520,7 +520,7 @@ No extra text before the first QUESTION:
 # =================================================
 # XP POPUP
 # =================================================
-def show_xp_popup()
+def show_xp_popup():
 if st.session_state.get("challenge_result_message"):
     st.info(st.session_state.challenge_result_message):
     popup_text = st.session_state.get("xp_popup_text", "").strip()
@@ -1411,3 +1411,4 @@ if (
             else:
                 prepare_question(active_topic, active_diff)
                 st.rerun()
+
