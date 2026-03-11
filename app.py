@@ -4,7 +4,7 @@ import json
 import random
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -64,8 +64,8 @@ ALL_DOMAINS_TARGET = 25
 ALL_DOMAINS_BATCH_SIZE = 25
 
 CHALLENGE_QUESTIONS = 5
-CHALLENGE_TOTAL_SECONDS = 150  # 2:30 total for the whole challenge
-
+CHALLENGE_TOTAL_SECONDS = 150  # 2 minutes 30 seconds
+QUESTION_TIMER_SECONDS = 15
 XP_CORRECT = 10
 XP_WRONG = 0
 XP_WIN = 50
@@ -140,15 +140,6 @@ def now_utc():
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
-def utc_to_ts(value) -> float:
-    try:
-        if not value:
-            return time.time()
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return time.time()
-
-
 def safe_int(v, default=0):
     try:
         return int(v)
@@ -199,8 +190,8 @@ def check_firestore():
         return False, "Missing FIREBASE_SERVICE_ACCOUNT_JSON in secrets."
 
     try:
-        firestore_db = get_firestore_client()
-        list(firestore_db.collection("players").limit(1).stream())
+        db = get_firestore_client()
+        list(db.collection("players").limit(1).stream())
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -255,9 +246,7 @@ def load_challenges():
 
 @st.cache_data(ttl=20)
 def load_sessions():
-    docs = db().collection("sessions").order_by(
-        "timestamp_utc", direction=firestore.Query.DESCENDING
-    ).limit(100).stream()
+    docs = db().collection("sessions").order_by("timestamp_utc", direction=firestore.Query.DESCENDING).limit(100).stream()
     return [doc.to_dict() or {} for doc in docs]
 
 
@@ -390,7 +379,6 @@ def create_challenge(challenger: str, opponent: str, domain: str, difficulty: st
         "domain": domain,
         "difficulty": difficulty,
         "status": "pending",
-        "accepted_utc": None,
         "challenger_score": None,
         "opponent_score": None,
     })
@@ -530,9 +518,11 @@ No extra text before the first QUESTION:
 
 
 # =================================================
-# UI HELPERS
+# XP POPUP
 # =================================================
-def show_xp_popup():
+def show_xp_popup()
+if st.session_state.get("challenge_result_message"):
+    st.info(st.session_state.challenge_result_message):
     popup_text = st.session_state.get("xp_popup_text", "").strip()
     popup_kind = st.session_state.get("xp_popup_kind", "good")
     popup_nonce = st.session_state.get("xp_popup_nonce", 0)
@@ -595,6 +585,9 @@ def show_xp_popup():
     )
 
 
+# =================================================
+# COMBO METER
+# =================================================
 def render_combo_meter(streak_value: int):
     streak_value = max(0, int(streak_value))
 
@@ -694,86 +687,72 @@ def prepare_question(topic_: str, difficulty_: str):
     st.session_state.answer_choice = None
     st.session_state.submit_locked = False
     st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    st.session_state.question_deadline = 0.0
+    st.session_state.time_up_handled = False
 
 
-def clear_challenge_state():
+def complete_challenge_and_show_result(cid: str, player_id_lower: str):
+    try:
+        current_snap = challenge_ref(cid).get()
+        challenge_row = current_snap.to_dict() if current_snap.exists else None
+
+        if challenge_row:
+            if str(challenge_row.get("challenger", "")).strip().lower() == player_id_lower:
+                update_challenge(cid, {"challenger_score": st.session_state.challenge_correct})
+            elif str(challenge_row.get("opponent", "")).strip().lower() == player_id_lower:
+                update_challenge(cid, {"opponent_score": st.session_state.challenge_correct})
+
+            refreshed_snap = challenge_ref(cid).get()
+            refreshed = refreshed_snap.to_dict() if refreshed_snap.exists else None
+
+            if refreshed and refreshed.get("challenger_score") is not None and refreshed.get("opponent_score") is not None:
+                update_challenge(cid, {"status": "done"})
+                final_snap = challenge_ref(cid).get()
+                final_row = final_snap.to_dict() if final_snap.exists else None
+
+                if final_row:
+                    c = final_row["challenger"]
+                    o = final_row["opponent"]
+                    cs = safe_int(final_row.get("challenger_score", 0))
+                    os_ = safe_int(final_row.get("opponent_score", 0))
+
+                    if cs > os_:
+                        add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
+                        add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
+                    elif os_ > cs:
+                        add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
+                        add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
+                    else:
+                        add_xp_and_streak(c, XP_DRAW, 0)
+                        add_xp_and_streak(o, XP_DRAW, 0)
+
+                    is_challenger = str(final_row.get("challenger", "")).strip().lower() == player_id_lower
+                    my_score = cs if is_challenger else os_
+                    opp_score = os_ if is_challenger else cs
+
+                    if my_score > opp_score:
+                        st.session_state.challenge_result_message = f"🏆 You won the challenge! ({my_score} vs {opp_score})"
+                    elif my_score < opp_score:
+                        st.session_state.challenge_result_message = f"😔 You lost the challenge. ({my_score} vs {opp_score})"
+                    else:
+                        st.session_state.challenge_result_message = f"🤝 Challenge tied! ({my_score} vs {opp_score})"
+            else:
+                st.session_state.challenge_result_message = "✅ Challenge submitted! Waiting for the other student."
+    except Exception as e:
+        st.warning("Could not update challenge.")
+        st.code(str(e))
+
     st.session_state.challenge_mode = False
     st.session_state.challenge_id = None
     st.session_state.challenge_count = 0
     st.session_state.challenge_correct = 0
     st.session_state.active_domain = None
     st.session_state.active_difficulty = None
+    st.session_state.question = None
+    st.session_state.question_deadline = 0.0
+    st.session_state.time_up_handled = False
     st.session_state.challenge_start_time = 0.0
     st.session_state.challenge_time_over = False
-    st.session_state.question = None
-    st.session_state.answered = False
-    st.session_state.answer_choice = None
-    st.session_state.submit_locked = False
-    st.session_state.question_token = ""
-
-
-def finalize_challenge_result(cid: str, player_id_lower: str):
-    try:
-        current_snap = challenge_ref(cid).get()
-        challenge_row = current_snap.to_dict() if current_snap.exists else None
-
-        if challenge_row:
-            is_challenger = str(challenge_row.get("challenger", "")).strip().lower() == player_id_lower
-            if is_challenger:
-                update_challenge(cid, {"challenger_score": st.session_state.challenge_correct})
-            else:
-                update_challenge(cid, {"opponent_score": st.session_state.challenge_correct})
-
-        refreshed_snap = challenge_ref(cid).get()
-        refreshed = refreshed_snap.to_dict() if refreshed_snap.exists else None
-
-        if not refreshed:
-            st.session_state.challenge_result_message = "Challenge finished."
-            clear_challenge_state()
-            return
-
-        cs = refreshed.get("challenger_score")
-        os_ = refreshed.get("opponent_score")
-
-        if cs is None or os_ is None:
-            st.session_state.challenge_result_message = "✅ Challenge submitted! Waiting for the other student."
-            clear_challenge_state()
-            return
-
-        update_challenge(cid, {"status": "done"})
-        cs = safe_int(cs, 0)
-        os_ = safe_int(os_, 0)
-
-        c_name = refreshed.get("challenger", "Challenger")
-        o_name = refreshed.get("opponent", "Opponent")
-
-        if cs > os_:
-            add_xp_and_streak(c_name, XP_WIN, 0, win_delta=1)
-            add_xp_and_streak(o_name, XP_LOSS, 0, loss_delta=1)
-        elif os_ > cs:
-            add_xp_and_streak(o_name, XP_WIN, 0, win_delta=1)
-            add_xp_and_streak(c_name, XP_LOSS, 0, loss_delta=1)
-        else:
-            add_xp_and_streak(c_name, XP_DRAW, 0)
-            add_xp_and_streak(o_name, XP_DRAW, 0)
-
-        am_challenger = str(refreshed.get("challenger", "")).strip().lower() == player_id_lower
-        my_score = cs if am_challenger else os_
-        opp_score = os_ if am_challenger else cs
-
-        if my_score > opp_score:
-            st.session_state.challenge_result_message = f"🏆 You won the challenge! ({my_score} vs {opp_score})"
-        elif my_score < opp_score:
-            st.session_state.challenge_result_message = f"😔 You lost the challenge. ({my_score} vs {opp_score})"
-        else:
-            st.session_state.challenge_result_message = f"🤝 Challenge tied! ({my_score} vs {opp_score})"
-
-    except Exception as e:
-        st.warning("Could not update challenge.")
-        st.code(str(e))
-        st.session_state.challenge_result_message = "Challenge finished with an update error."
-
-    clear_challenge_state()
 
 
 # =================================================
@@ -803,6 +782,8 @@ st.session_state.setdefault("challenge_count", 0)
 st.session_state.setdefault("challenge_correct", 0)
 st.session_state.setdefault("active_domain", None)
 st.session_state.setdefault("active_difficulty", None)
+st.session_state.setdefault("question_deadline", 0.0)
+st.session_state.setdefault("time_up_handled", False)
 st.session_state.setdefault("challenge_start_time", 0.0)
 st.session_state.setdefault("challenge_time_over", False)
 st.session_state.setdefault("challenge_result_message", "")
@@ -814,10 +795,12 @@ st.session_state.setdefault("firebase_error", "")
 st.session_state.setdefault("leaderboard_cache", [])
 st.session_state.setdefault("challenge_cache", [])
 st.session_state.setdefault("last_db_sync", 0)
+st.session_state.setdefault("session_logged", False)
 
 st.session_state.setdefault("xp_popup_text", "")
 st.session_state.setdefault("xp_popup_kind", "")
 st.session_state.setdefault("xp_popup_nonce", 0)
+
 
 # =================================================
 # CHECK FIRESTORE
@@ -825,6 +808,7 @@ st.session_state.setdefault("xp_popup_nonce", 0)
 firebase_ok, firebase_err = check_firestore()
 st.session_state["firebase_ok"] = firebase_ok
 st.session_state["firebase_error"] = firebase_err
+
 
 # =================================================
 # LOGIN / TEACHER MODE FIRST
@@ -874,12 +858,13 @@ with st.sidebar.expander("🔒 Teacher Panel"):
             st.session_state.is_teacher = False
             st.info("Teacher mode OFF")
 
+
 # =================================================
 # AUTO REFRESH
 # =================================================
-if st.session_state.get("challenge_mode", False):
-    st_autorefresh(interval=1000, limit=None, key="challenge_timer")
-    st.sidebar.caption("⏱ Challenge timer active")
+if st.session_state.get("challenge_mode", False) and st.session_state.get("question") and not st.session_state.get("answered", False):
+    st_autorefresh(interval=1000, limit=None, key="question_timer_tick")
+    st.sidebar.caption("⏳ Challenge timer active")
 elif st.session_state.get("is_teacher", False):
     live_refresh = st.sidebar.checkbox("Live leaderboard refresh", value=False)
     refresh_seconds = st.sidebar.selectbox("Refresh speed", [30, 60, 120], index=0)
@@ -893,11 +878,11 @@ else:
     student_live_refresh = st.sidebar.checkbox("Auto-refresh challenges", value=True)
     student_refresh_seconds = st.sidebar.selectbox("Challenge refresh speed", [5, 8, 10, 15], index=1)
 
-    if student_live_refresh:
+    if student_live_refresh and not st.session_state.get("challenge_mode", False):
         st_autorefresh(interval=student_refresh_seconds * 1000, limit=None, key="student_challenge_refresh")
         st.sidebar.caption(f"🔄 Student refresh every {student_refresh_seconds} seconds")
     else:
-        st.sidebar.caption("Student auto-refresh off")
+        st.sidebar.caption("Student auto-refresh paused during active challenge")
 
 if not st.session_state.player_id:
     st.warning("Enter First Name + numeric Student ID to start.")
@@ -926,6 +911,7 @@ if lu:
 
 st.sidebar.success("✅ Persistent mode: Firebase Firestore")
 
+
 # =================================================
 # SINGLE DATA FETCH
 # =================================================
@@ -944,44 +930,8 @@ me = next(
     {}
 )
 
-# =================================================
-# AUTO-START ACCEPTED CHALLENGE FOR EITHER PLAYER
-# =================================================
-if not st.session_state.challenge_mode:
-    accepted_for_me = next(
-        (
-            c for c in ch_all
-            if c.get("status") == "accepted"
-            and (
-                (
-                    str(c.get("challenger", "")).strip().lower() == player_id_lower
-                    and c.get("challenger_score") is None
-                )
-                or (
-                    str(c.get("opponent", "")).strip().lower() == player_id_lower
-                    and c.get("opponent_score") is None
-                )
-            )
-        ),
-        None
-    )
-
-    if accepted_for_me:
-        st.session_state.challenge_mode = True
-        st.session_state.challenge_id = accepted_for_me["challenge_id"]
-        st.session_state.challenge_count = 0
-        st.session_state.challenge_correct = 0
-        st.session_state.active_domain = accepted_for_me["domain"]
-        st.session_state.active_difficulty = accepted_for_me["difficulty"]
-        st.session_state.challenge_start_time = utc_to_ts(accepted_for_me.get("accepted_utc"))
-        st.session_state.challenge_time_over = False
-        st.session_state.challenge_result_message = ""
-        prepare_question(accepted_for_me["domain"], accepted_for_me["difficulty"])
-        st.rerun()
-
 show_xp_popup()
-if st.session_state.get("challenge_result_message"):
-    st.info(st.session_state.challenge_result_message)
+
 
 # =================================================
 # LEADERBOARD
@@ -1089,6 +1039,7 @@ for i, r in enumerate(lb_sorted[:25], start=1):
 
 st.dataframe(top_rows, use_container_width=True, height=340)
 
+
 # =================================================
 # CHALLENGE DIRECTLY FROM LEADERBOARD
 # =================================================
@@ -1121,6 +1072,7 @@ for i, r in enumerate(lb_sorted[:10], start=1):
                         st.warning("Could not create challenge.")
                         st.code(str(e))
 
+
 # =================================================
 # PERIOD VS PERIOD
 # =================================================
@@ -1135,6 +1087,7 @@ period_rows = [{"Period": k, "Total XP": v} for k, v in sorted(period_totals.ite
 st.dataframe(period_rows, use_container_width=True, height=220)
 
 st.divider()
+
 
 # =================================================
 # STUDENT STATUS
@@ -1157,6 +1110,7 @@ render_combo_meter(my_streak)
 
 st.divider()
 
+
 # =================================================
 # CHALLENGE INBOX / OUTBOX
 # =================================================
@@ -1171,7 +1125,7 @@ incoming = [
 outgoing = [
     c for c in ch_all
     if str(c.get("challenger", "")).strip().lower() == player_id_lower
-    and c.get("status") in ("pending", "accepted")
+    and c.get("status") == "accepted"
 ]
 
 left, right = st.columns(2)
@@ -1186,25 +1140,21 @@ with left:
             if c["status"] == "pending":
                 if st.button(f"Accept {c['challenge_id']}"):
                     try:
-                        accepted_utc = now_utc()
-                        update_challenge(c["challenge_id"], {"status": "accepted", "accepted_utc": accepted_utc})
+                        update_challenge(c["challenge_id"], {"status": "accepted"})
                         st.session_state.challenge_mode = True
                         st.session_state.challenge_id = c["challenge_id"]
                         st.session_state.challenge_count = 0
                         st.session_state.challenge_correct = 0
                         st.session_state.active_domain = c["domain"]
                         st.session_state.active_difficulty = c["difficulty"]
-                        st.session_state.challenge_start_time = utc_to_ts(accepted_utc)
+                        st.session_state.challenge_start_time = time.time()
                         st.session_state.challenge_time_over = False
                         st.session_state.challenge_result_message = ""
                         prepare_question(c["domain"], c["difficulty"])
                         st.success("⚔️ Challenge started!")
-                        st.rerun()
                     except Exception as e:
                         st.warning("Could not accept challenge.")
                         st.code(str(e))
-            else:
-                st.caption("Already accepted. Starting automatically.")
 
 with right:
     st.markdown("### Sent")
@@ -1213,12 +1163,21 @@ with right:
     else:
         for c in outgoing[:10]:
             st.write(f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`")
-            if c["status"] == "pending":
-                st.caption("Waiting for the other student to accept.")
-            else:
-                st.caption("Accepted. Starts automatically for both players.")
+            if st.button(f"Start {c['challenge_id']}"):
+                st.session_state.challenge_mode = True
+                st.session_state.challenge_id = c["challenge_id"]
+                st.session_state.challenge_count = 0
+                st.session_state.challenge_correct = 0
+                st.session_state.active_domain = c["domain"]
+                st.session_state.active_difficulty = c["difficulty"]
+                st.session_state.challenge_start_time = time.time()
+                st.session_state.challenge_time_over = False
+                st.session_state.challenge_result_message = ""
+                prepare_question(c["domain"], c["difficulty"])
+                st.success("⚔️ Challenge started!")
 
 st.divider()
+
 
 # =================================================
 # TEACHER PANEL CONTENT
@@ -1332,6 +1291,7 @@ if st.session_state.is_teacher:
         })
     st.dataframe(teacher_rows, use_container_width=True, height=240)
 
+
 # =================================================
 # QUESTION PICKER
 # =================================================
@@ -1361,18 +1321,12 @@ active_diff = difficulty
 if st.session_state.challenge_mode and st.session_state.active_domain and st.session_state.active_difficulty:
     active_topic = st.session_state.active_domain
     active_diff = st.session_state.active_difficulty
-
     elapsed = time.time() - st.session_state.challenge_start_time
     remaining = max(0, int(CHALLENGE_TOTAL_SECONDS - elapsed))
     minutes = remaining // 60
     seconds = remaining % 60
-
-    st.info(
-        f"⚔️ Challenge Mode: {active_topic} ({active_diff}) — "
-        f"Question {st.session_state.challenge_count + 1}/{CHALLENGE_QUESTIONS}"
-    )
+    st.info(f"⚔️ Challenge Mode: {active_topic} ({active_diff}) — Question {st.session_state.challenge_count + 1}/{CHALLENGE_QUESTIONS}")
     st.warning(f"⏱ Challenge Timer: {minutes}:{seconds:02d}")
-
     if remaining <= 0:
         st.session_state.challenge_time_over = True
 
@@ -1382,8 +1336,15 @@ if cooldown > 0:
 
 if not st.session_state.challenge_mode and st.button("Next Question", disabled=cooldown > 0):
     st.session_state.next_allowed_time = time.time() + max(COOLDOWN_SECONDS, 2)
-    prepare_question(active_topic, active_diff)
+    st.session_state.question = pick_question(active_topic, active_diff)
+    st.session_state.answered = False
+    st.session_state.answer_choice = None
+    st.session_state.submit_locked = False
+    st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    st.session_state.question_deadline = 0.0
+    st.session_state.time_up_handled = False
     st.rerun()
+
 
 # =================================================
 # QUESTION DISPLAY
@@ -1394,7 +1355,7 @@ if not q:
     st.stop()
 
 if st.session_state.challenge_mode and st.session_state.challenge_time_over:
-    finalize_challenge_result(st.session_state.challenge_id, player_id_lower)
+    complete_challenge_and_show_result(st.session_state.challenge_id, player_id_lower)
     st.rerun()
 
 st.markdown("## 🧠 Question")
@@ -1404,98 +1365,48 @@ st.markdown(f"**B)** {q['B']}")
 st.markdown(f"**C)** {q['C']}")
 st.markdown(f"**D)** {q['D']}")
 
-st.radio(
-    "Answer",
-    ["A", "B", "C", "D"],
-    index=None,
-    horizontal=True,
-    key="answer_choice",
-    disabled=st.session_state.answered
-)
+if (
+    not st.session_state.answered
+    and st.session_state.question_deadline > 0
+    and time.time() >= st.session_state.question_deadline
+    and not st.session_state.time_up_handled
+):
+    st.session_state.time_up_handled = True
+    st.session_state.submit_locked = True
+    st.session_state.id_locked = True
+    st.session_state.answered = True
+    st.session_state.total_answered += 1
 
-if st.button("Submit Answer", disabled=st.session_state.submit_locked or st.session_state.answered):
-    if st.session_state.answer_choice is None:
-        st.warning("Select an answer first.")
-    elif st.session_state.answered:
-        st.warning("Already submitted.")
-    else:
-        token = st.session_state.get("question_token", "")
-        if token and token in st.session_state.answered_tokens:
-            st.warning("This question was already submitted.")
-            st.stop()
+    try:
+        add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
+        mark_db_data_stale()
+    except Exception as e:
+        st.warning("Could not save timeout result to Firebase.")
+        st.code(str(e))
 
-        st.session_state.submit_locked = True
-        st.session_state.id_locked = True
-        st.session_state.answered = True
-        st.session_state.total_answered += 1
+    st.session_state.xp_popup_text = "⏰ Time Up\n❌ Streak Reset"
+    st.session_state.xp_popup_kind = "warn"
+    st.session_state.xp_popup_nonce += 1
 
-        correct = (st.session_state.answer_choice == q["correct"])
+    try:
+        log_session(
+            st.session_state.first_name.strip() or st.session_state.player_id,
+            st.session_state.student_period,
+            st.session_state.score,
+            st.session_state.total_answered,
+        )
+    except Exception as e:
+        st.warning("Could not save session log to Firebase.")
+        st.code(str(e))
 
-        if correct:
-            streak_before = safe_int(me.get("streak", 0))
-            streak_after = streak_before + 1
-            bonus = STREAK_BONUS_XP if streak_after % STREAK_BONUS_EVERY == 0 else 0
-
-            st.session_state.score += 1
-
-            try:
-                add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
-                mark_db_data_stale()
-            except Exception as e:
-                st.warning("Could not save score to Firebase.")
-                st.code(str(e))
-
-            if bonus:
-                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP\n🔥 Streak Bonus +{bonus}"
-            else:
-                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP"
-
-            st.session_state.xp_popup_kind = "good"
-            st.session_state.xp_popup_nonce += 1
-
-            if bonus:
-                st.success(f"✅ Correct! +{XP_CORRECT} XP  🔥 Streak bonus +{bonus} XP!")
-            else:
-                st.success(f"✅ Correct! +{XP_CORRECT} XP")
-        else:
-            try:
-                add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
-                mark_db_data_stale()
-            except Exception as e:
-                st.warning("Could not save score to Firebase.")
-                st.code(str(e))
-
-            st.session_state.xp_popup_text = "❌ Streak Reset"
-            st.session_state.xp_popup_kind = "warn"
-            st.session_state.xp_popup_nonce += 1
-
-            st.error(f"❌ Incorrect. Correct answer: {q['correct']}")
-
-        if token:
-            st.session_state.answered_tokens = [t for t in st.session_state.answered_tokens if t != token]
-            st.session_state.answered_tokens.append(token)
-            st.session_state.answered_tokens = st.session_state.answered_tokens[-200:]
-
-        st.info(q["explanation"])
-
-        try:
-            log_session(
-                st.session_state.first_name.strip() or st.session_state.player_id,
-                st.session_state.student_period,
-                st.session_state.score,
-                st.session_state.total_answered,
-            )
-        except Exception as e:
-            st.warning("Could not save session log to Firebase.")
-            st.code(str(e))
-
-        if st.session_state.challenge_mode and st.session_state.challenge_id:
+    if st.session_state.challenge_mode and st.session_state.challenge_id:
+            cid = st.session_state.challenge_id
             st.session_state.challenge_count += 1
             if correct:
                 st.session_state.challenge_correct += 1
 
             if st.session_state.challenge_count >= CHALLENGE_QUESTIONS:
-                finalize_challenge_result(st.session_state.challenge_id, player_id_lower)
+                complete_challenge_and_show_result(cid, player_id_lower)
                 st.rerun()
             else:
                 prepare_question(active_topic, active_diff)
