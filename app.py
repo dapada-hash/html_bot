@@ -1089,7 +1089,7 @@ with right:
                 st.session_state.active_domain = c["domain"]
                 st.session_state.active_difficulty = c["difficulty"]
                 st.session_state.question_deadline = 0.0
-                st.session_state.time_up_handled = False      
+                st.session_state.time_up_handled = False
                 st.success("Challenge attempt started!")
 
 st.divider()
@@ -1250,7 +1250,7 @@ if st.button("Next Question", disabled=cooldown > 0 or st.session_state.submit_l
     st.session_state.answer_choice = None
     st.session_state.submit_locked = False
     st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
-    st.session_state.question_deadline = time.time() + QUESTION_TIMER_SECONDS
+    st.session_state.question_deadline = 0.0
     st.session_state.time_up_handled = False
     st.rerun()
 
@@ -1296,7 +1296,7 @@ if (
         st.warning("Could not save timeout result to Firebase.")
         st.code(str(e))
 
-    st.session_state.xp_popup_text = "⏰ Time Up\\n❌ Streak Reset"
+    st.session_state.xp_popup_text = "⏰ Time Up\n❌ Streak Reset"
     st.session_state.xp_popup_kind = "warn"
     st.session_state.xp_popup_nonce += 1
 
@@ -1373,7 +1373,7 @@ if (
     st.session_state.answer_choice = None
     st.session_state.submit_locked = False
     st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
-    st.session_state.question_deadline = time.time() + QUESTION_TIMER_SECONDS
+    st.session_state.question_deadline = 0.0
     st.session_state.time_up_handled = False
     st.rerun()
 
