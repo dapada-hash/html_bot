@@ -753,8 +753,8 @@ def complete_challenge_and_show_result(cid: str, player_id_lower: str):
     st.session_state.challenge_time_over = False
 
 
-active_topic = topic
-active_diff = difficulty
+active_topic = st.session_state.get("active_domain") or st.session_state.get("selected_topic") or (DOMAINS[0] if DOMAINS else "")
+active_diff = st.session_state.get("active_difficulty") or st.session_state.get("selected_difficulty") or "Easy"
 
 if st.session_state.challenge_mode and st.session_state.active_domain and st.session_state.active_difficulty:
     active_topic = st.session_state.active_domain
