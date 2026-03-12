@@ -190,6 +190,23 @@ def challenge_sort_key(challenge_row: dict):
     return str(challenge_row.get("created_utc", ""))
 
 
+def is_active_challenge(challenge_row: dict) -> bool:
+    return challenge_row.get("status") in ("pending", "accepted")
+
+
+def player_has_active_challenge(player_id_value: str, challenges: list) -> bool:
+    pid = str(player_id_value).strip().lower()
+    if not pid:
+        return False
+
+    for c in challenges:
+        challenger = str(c.get("challenger", "")).strip().lower()
+        opponent = str(c.get("opponent", "")).strip().lower()
+        if is_active_challenge(c) and (challenger == pid or opponent == pid):
+            return True
+    return False
+
+
 # =================================================
 # FIREBASE / FIRESTORE
 # =================================================
@@ -397,6 +414,14 @@ def log_session(name: str, period: str, score: int, answered: int):
 
 
 def create_challenge(challenger: str, opponent: str, domain: str, difficulty: str):
+    existing = load_challenges()
+
+    if player_has_active_challenge(challenger, existing):
+        raise ValueError(f"{challenger} already has an active challenge.")
+
+    if player_has_active_challenge(opponent, existing):
+        raise ValueError(f"{opponent} already has an active challenge.")
+
     ref = db().collection("challenges").document()
     ref.set({
         "challenge_id": ref.id,
@@ -893,6 +918,7 @@ me = next(
     (r for r in lb if str(r.get("name", "")).strip().lower() == player_id_lower),
     {}
 )
+my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
 
 show_xp_popup()
 
@@ -1007,6 +1033,9 @@ st.dataframe(top_rows, use_container_width=True, height=340)
 # =================================================
 st.markdown("### ⚔️ Challenge Directly From the Leaderboard")
 
+if my_has_active_challenge:
+    st.caption("You already have an active challenge. Finish it before sending another one.")
+
 for i, r in enumerate(lb_sorted[:10], start=1):
     medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
     row_cols = st.columns([1, 4, 2, 2, 2])
@@ -1021,18 +1050,31 @@ for i, r in enumerate(lb_sorted[:10], start=1):
         st.markdown(f"🔥 {safe_int(r.get('streak', 0))}")
     with row_cols[4]:
         opp_name = r.get("name", "")
-        if opp_name and opp_name.lower() != player_id_lower:
-            if st.button("⚔️ Challenge", key=f"challenge_{opp_name}_{i}"):
-                if time.time() - st.session_state.last_challenge_sent_at < 5:
-                    st.warning("Please wait a few seconds before sending another challenge.")
-                else:
-                    try:
-                        create_challenge(st.session_state.player_id, opp_name, topic, difficulty)
-                        st.session_state.last_challenge_sent_at = time.time()
-                        st.success(f"Challenge sent to {opp_name}!")
-                    except Exception as e:
-                        st.warning("Could not create challenge.")
-                        st.code(str(e))
+        opp_lower = str(opp_name).strip().lower()
+
+        disabled_send = (
+            not opp_name
+            or opp_lower == player_id_lower
+            or my_has_active_challenge
+            or player_has_active_challenge(opp_name, ch_all)
+        )
+
+        button_label = "⚔️ Challenge"
+        if opp_name and player_has_active_challenge(opp_name, ch_all):
+            button_label = "Busy"
+
+        if st.button(button_label, key=f"challenge_{opp_name}_{i}", disabled=disabled_send):
+            if time.time() - st.session_state.last_challenge_sent_at < 5:
+                st.warning("Please wait a few seconds before sending another challenge.")
+            else:
+                try:
+                    create_challenge(st.session_state.player_id, opp_name, topic, difficulty)
+                    st.session_state.last_challenge_sent_at = time.time()
+                    st.success(f"Challenge sent to {opp_name}!")
+                    st.rerun()
+                except Exception as e:
+                    st.warning("Could not create challenge.")
+                    st.code(str(e))
 
 # =================================================
 # PERIOD VS PERIOD
