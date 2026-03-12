@@ -74,6 +74,7 @@ STREAK_BONUS_EVERY = 5
 STREAK_BONUS_XP = 20
 
 COOLDOWN_SECONDS = 1
+MAX_CHALLENGE_HISTORY_PER_COLUMN = 2
 
 # =================================================
 # DOMAINS
@@ -185,6 +186,10 @@ def my_challenge_already_completed(challenge_row: dict, player_id_lower_: str) -
     return challenge_row.get(score_field) is not None
 
 
+def challenge_sort_key(challenge_row: dict):
+    return str(challenge_row.get("created_utc", ""))
+
+
 # =================================================
 # FIREBASE / FIRESTORE
 # =================================================
@@ -206,8 +211,8 @@ def check_firestore():
         return False, "Missing FIREBASE_SERVICE_ACCOUNT_JSON in secrets."
 
     try:
-        db = get_firestore_client()
-        list(db.collection("players").limit(1).stream())
+        db_ = get_firestore_client()
+        list(db_.collection("players").limit(1).stream())
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -262,7 +267,10 @@ def load_challenges():
 
 @st.cache_data(ttl=20)
 def load_sessions():
-    docs = db().collection("sessions").order_by("timestamp_utc", direction=firestore.Query.DESCENDING).limit(100).stream()
+    docs = db().collection("sessions").order_by(
+        "timestamp_utc",
+        direction=firestore.Query.DESCENDING
+    ).limit(100).stream()
     return [doc.to_dict() or {} for doc in docs]
 
 
@@ -1015,7 +1023,10 @@ for r in lb:
     p = r.get("period", "Other")
     period_totals[p] = period_totals.get(p, 0) + safe_int(r.get("xp", 0))
 
-period_rows = [{"Period": k, "Total XP": v} for k, v in sorted(period_totals.items(), key=lambda x: x[1], reverse=True)]
+period_rows = [
+    {"Period": k, "Total XP": v}
+    for k, v in sorted(period_totals.items(), key=lambda x: x[1], reverse=True)
+]
 st.dataframe(period_rows, use_container_width=True, height=220)
 
 st.divider()
@@ -1060,6 +1071,9 @@ outgoing = [
     and c.get("status") in ("pending", "accepted", "done")
 ]
 
+incoming = sorted(incoming, key=challenge_sort_key, reverse=True)[:MAX_CHALLENGE_HISTORY_PER_COLUMN]
+outgoing = sorted(outgoing, key=challenge_sort_key, reverse=True)[:MAX_CHALLENGE_HISTORY_PER_COLUMN]
+
 left, right = st.columns(2)
 
 with left:
@@ -1067,11 +1081,13 @@ with left:
     if not incoming:
         st.caption("No incoming challenges.")
     else:
-        for c in incoming[:10]:
+        for c in incoming:
             already_completed = my_challenge_already_completed(c, player_id_lower)
             challenge_done = c.get("status") == "done"
 
-            st.write(f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`")
+            st.write(
+                f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
+            )
 
             if c["status"] == "pending":
                 if st.button(f"Accept {c['challenge_id']}", key=f"accept_{c['challenge_id']}"):
@@ -1123,11 +1139,13 @@ with right:
     if not outgoing:
         st.caption("No active sent challenges.")
     else:
-        for c in outgoing[:10]:
+        for c in outgoing:
             already_completed = my_challenge_already_completed(c, player_id_lower)
             challenge_done = c.get("status") == "done"
 
-            st.write(f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`")
+            st.write(
+                f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
+            )
 
             if challenge_done:
                 st.button(
@@ -1198,7 +1216,7 @@ if st.session_state.is_teacher:
             progress = progress_box.progress(0)
 
             for i in range(BANK_CALLS):
-                status_box.info(f"Building bank... batch {i+1}/{BANK_CALLS}")
+                status_box.info(f"Building bank... batch {i + 1}/{BANK_CALLS}")
                 qs, err = fetch_questions_from_gemini(topic, difficulty, BATCH_SIZE)
 
                 if qs:
@@ -1300,7 +1318,10 @@ active_diff = difficulty
 if st.session_state.challenge_mode and st.session_state.active_domain and st.session_state.active_difficulty:
     active_topic = st.session_state.active_domain
     active_diff = st.session_state.active_difficulty
-    st.info(f"⚔️ Challenge Mode: {active_topic} ({active_diff}) — Question {st.session_state.challenge_count + 1}/{CHALLENGE_QUESTIONS}")
+    st.info(
+        f"⚔️ Challenge Mode: {active_topic} ({active_diff}) — "
+        f"Question {st.session_state.challenge_count + 1}/{CHALLENGE_QUESTIONS}"
+    )
 
 cooldown = int(max(0, st.session_state.next_allowed_time - time.time()))
 if cooldown > 0:
@@ -1435,7 +1456,11 @@ if st.button("Submit Answer", disabled=st.session_state.submit_locked or st.sess
                         refreshed_snap = challenge_ref(cid).get()
                         refreshed = refreshed_snap.to_dict() if refreshed_snap.exists else None
 
-                        if refreshed and refreshed.get("challenger_score") is not None and refreshed.get("opponent_score") is not None:
+                        if (
+                            refreshed
+                            and refreshed.get("challenger_score") is not None
+                            and refreshed.get("opponent_score") is not None
+                        ):
                             if refreshed.get("status") != "done":
                                 update_challenge(cid, {"status": "done"})
 
