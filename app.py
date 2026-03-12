@@ -1069,6 +1069,63 @@ render_combo_meter(my_streak)
 st.divider()
 
 # =================================================
+# QUESTION PICKER / CHALLENGE START HELPERS
+# =================================================
+def pick_question(topic_: str, difficulty_: str):
+    bank = get_bank(topic_, difficulty_)
+    if not bank:
+        return random.choice(FALLBACK_QUESTIONS)
+
+    key = (topic_, difficulty_)
+    seen = st.session_state.seen_by_domain.setdefault(key, set())
+
+    if len(seen) >= len(bank):
+        seen.clear()
+
+    for _ in range(100):
+        idx = random.randrange(len(bank))
+        if idx not in seen:
+            seen.add(idx)
+            return bank[idx]
+
+    return random.choice(bank)
+
+
+def load_question(topic_: str, difficulty_: str):
+    st.session_state.next_allowed_time = time.time() + max(COOLDOWN_SECONDS, 2)
+    st.session_state.question = pick_question(topic_, difficulty_)
+    st.session_state.answered = False
+    st.session_state.answer_choice = None
+    st.session_state.submit_locked = False
+    st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+
+
+def load_next_question_for_current_mode():
+    active_topic_local = topic
+    active_diff_local = difficulty
+
+    if (
+        st.session_state.challenge_mode
+        and st.session_state.active_domain
+        and st.session_state.active_difficulty
+    ):
+        active_topic_local = st.session_state.active_domain
+        active_diff_local = st.session_state.active_difficulty
+
+    load_question(active_topic_local, active_diff_local)
+
+
+def start_challenge_attempt(challenge_row: dict):
+    st.session_state.challenge_mode = True
+    st.session_state.challenge_id = challenge_row["challenge_id"]
+    st.session_state.challenge_count = 0
+    st.session_state.challenge_correct = 0
+    st.session_state.active_domain = challenge_row["domain"]
+    st.session_state.active_difficulty = challenge_row["difficulty"]
+    load_question(challenge_row["domain"], challenge_row["difficulty"])
+
+
+# =================================================
 # CHALLENGE INBOX / OUTBOX
 # =================================================
 st.markdown("## 📩 Challenges")
@@ -1107,17 +1164,9 @@ with left:
                 if st.button(f"Accept {c['challenge_id']}", key=f"accept_{c['challenge_id']}"):
                     try:
                         update_challenge(c["challenge_id"], {"status": "accepted"})
-                        st.session_state.challenge_mode = True
-                        st.session_state.challenge_id = c["challenge_id"]
-                        st.session_state.challenge_count = 0
-                        st.session_state.challenge_correct = 0
-                        st.session_state.active_domain = c["domain"]
-                        st.session_state.active_difficulty = c["difficulty"]
-                        st.session_state.answered = False
-                        st.session_state.answer_choice = None
-                        st.session_state.submit_locked = False
-                        st.session_state.question = None
+                        start_challenge_attempt(c)
                         st.success("Challenge accepted!")
+                        st.rerun()
                     except Exception as e:
                         st.warning("Could not accept challenge.")
                         st.code(str(e))
@@ -1136,17 +1185,9 @@ with left:
                 )
             else:
                 if st.button(f"Start {c['challenge_id']}", key=f"incoming_start_{c['challenge_id']}"):
-                    st.session_state.challenge_mode = True
-                    st.session_state.challenge_id = c["challenge_id"]
-                    st.session_state.challenge_count = 0
-                    st.session_state.challenge_correct = 0
-                    st.session_state.active_domain = c["domain"]
-                    st.session_state.active_difficulty = c["difficulty"]
-                    st.session_state.answered = False
-                    st.session_state.answer_choice = None
-                    st.session_state.submit_locked = False
-                    st.session_state.question = None
+                    start_challenge_attempt(c)
                     st.success("Challenge attempt started!")
+                    st.rerun()
 
 with right:
     st.markdown("### Sent")
@@ -1175,17 +1216,9 @@ with right:
                 )
             else:
                 if st.button(f"Start {c['challenge_id']}", key=f"start_{c['challenge_id']}"):
-                    st.session_state.challenge_mode = True
-                    st.session_state.challenge_id = c["challenge_id"]
-                    st.session_state.challenge_count = 0
-                    st.session_state.challenge_correct = 0
-                    st.session_state.active_domain = c["domain"]
-                    st.session_state.active_difficulty = c["difficulty"]
-                    st.session_state.answered = False
-                    st.session_state.answer_choice = None
-                    st.session_state.submit_locked = False
-                    st.session_state.question = None
+                    start_challenge_attempt(c)
                     st.success("Challenge attempt started!")
+                    st.rerun()
 
 st.divider()
 
@@ -1302,48 +1335,8 @@ if st.session_state.is_teacher:
     st.dataframe(teacher_rows, use_container_width=True, height=240)
 
 # =================================================
-# QUESTION PICKER
+# QUESTION AREA
 # =================================================
-def pick_question(topic_: str, difficulty_: str):
-    bank = get_bank(topic_, difficulty_)
-    if not bank:
-        return random.choice(FALLBACK_QUESTIONS)
-
-    key = (topic_, difficulty_)
-    seen = st.session_state.seen_by_domain.setdefault(key, set())
-
-    if len(seen) >= len(bank):
-        seen.clear()
-
-    for _ in range(100):
-        idx = random.randrange(len(bank))
-        if idx not in seen:
-            seen.add(idx)
-            return bank[idx]
-
-    return random.choice(bank)
-
-
-def load_next_question_for_current_mode():
-    active_topic_local = topic
-    active_diff_local = difficulty
-
-    if (
-        st.session_state.challenge_mode
-        and st.session_state.active_domain
-        and st.session_state.active_difficulty
-    ):
-        active_topic_local = st.session_state.active_domain
-        active_diff_local = st.session_state.active_difficulty
-
-    st.session_state.next_allowed_time = time.time() + max(COOLDOWN_SECONDS, 2)
-    st.session_state.question = pick_question(active_topic_local, active_diff_local)
-    st.session_state.answered = False
-    st.session_state.answer_choice = None
-    st.session_state.submit_locked = False
-    st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
-
-
 active_topic = topic
 active_diff = difficulty
 
@@ -1365,19 +1358,14 @@ if not st.session_state.challenge_mode:
         disabled=cooldown > 0 or st.session_state.submit_locked,
         key="next_question_btn"
     ):
-        st.session_state.next_allowed_time = time.time() + max(COOLDOWN_SECONDS, 2)
-        st.session_state.question = pick_question(active_topic, active_diff)
-        st.session_state.answered = False
-        st.session_state.answer_choice = None
-        st.session_state.submit_locked = False
-        st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+        load_question(active_topic, active_diff)
 
-# =================================================
-# QUESTION DISPLAY
-# =================================================
 q = st.session_state.get("question")
 if not q:
-    st.info("Click **Next Question** to begin.")
+    if st.session_state.challenge_mode:
+        st.info("Challenge is ready. Your first question should load automatically.")
+    else:
+        st.info("Click **Next Question** to begin.")
     st.stop()
 
 st.markdown("## 🧠 Question")
