@@ -167,6 +167,24 @@ def firebase_config_present() -> bool:
     return bool(FIREBASE_SERVICE_ACCOUNT_JSON and str(FIREBASE_SERVICE_ACCOUNT_JSON).strip())
 
 
+def my_challenge_score_field(challenge_row: dict, player_id_lower_: str):
+    challenger_name = str(challenge_row.get("challenger", "")).strip().lower()
+    opponent_name = str(challenge_row.get("opponent", "")).strip().lower()
+
+    if challenger_name == player_id_lower_:
+        return "challenger_score"
+    if opponent_name == player_id_lower_:
+        return "opponent_score"
+    return None
+
+
+def my_challenge_already_completed(challenge_row: dict, player_id_lower_: str) -> bool:
+    score_field = my_challenge_score_field(challenge_row, player_id_lower_)
+    if not score_field:
+        return False
+    return challenge_row.get(score_field) is not None
+
+
 # =================================================
 # FIREBASE / FIRESTORE
 # =================================================
@@ -1033,13 +1051,13 @@ st.markdown("## 📩 Challenges")
 incoming = [
     c for c in ch_all
     if str(c.get("opponent", "")).strip().lower() == player_id_lower
-    and c.get("status") in ("pending", "accepted")
+    and c.get("status") in ("pending", "accepted", "done")
 ]
 
 outgoing = [
     c for c in ch_all
     if str(c.get("challenger", "")).strip().lower() == player_id_lower
-    and c.get("status") in ("pending", "accepted")
+    and c.get("status") in ("pending", "accepted", "done")
 ]
 
 left, right = st.columns(2)
@@ -1050,9 +1068,13 @@ with left:
         st.caption("No incoming challenges.")
     else:
         for c in incoming[:10]:
+            already_completed = my_challenge_already_completed(c, player_id_lower)
+            challenge_done = c.get("status") == "done"
+
             st.write(f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`")
+
             if c["status"] == "pending":
-                if st.button(f"Accept {c['challenge_id']}"):
+                if st.button(f"Accept {c['challenge_id']}", key=f"accept_{c['challenge_id']}"):
                     try:
                         update_challenge(c["challenge_id"], {"status": "accepted"})
                         st.session_state.challenge_mode = True
@@ -1061,10 +1083,40 @@ with left:
                         st.session_state.challenge_correct = 0
                         st.session_state.active_domain = c["domain"]
                         st.session_state.active_difficulty = c["difficulty"]
+                        st.session_state.answered = False
+                        st.session_state.answer_choice = None
+                        st.session_state.submit_locked = False
+                        st.session_state.question = None
                         st.success("Challenge accepted!")
                     except Exception as e:
                         st.warning("Could not accept challenge.")
                         st.code(str(e))
+
+            elif challenge_done:
+                st.button(
+                    "✅ Challenge Over",
+                    key=f"incoming_done_{c['challenge_id']}",
+                    disabled=True
+                )
+            elif already_completed:
+                st.button(
+                    "✅ Already Completed",
+                    key=f"incoming_completed_{c['challenge_id']}",
+                    disabled=True
+                )
+            else:
+                if st.button(f"Start {c['challenge_id']}", key=f"incoming_start_{c['challenge_id']}"):
+                    st.session_state.challenge_mode = True
+                    st.session_state.challenge_id = c["challenge_id"]
+                    st.session_state.challenge_count = 0
+                    st.session_state.challenge_correct = 0
+                    st.session_state.active_domain = c["domain"]
+                    st.session_state.active_difficulty = c["difficulty"]
+                    st.session_state.answered = False
+                    st.session_state.answer_choice = None
+                    st.session_state.submit_locked = False
+                    st.session_state.question = None
+                    st.success("Challenge attempt started!")
 
 with right:
     st.markdown("### Sent")
@@ -1072,15 +1124,36 @@ with right:
         st.caption("No active sent challenges.")
     else:
         for c in outgoing[:10]:
+            already_completed = my_challenge_already_completed(c, player_id_lower)
+            challenge_done = c.get("status") == "done"
+
             st.write(f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`")
-            if st.button(f"Start {c['challenge_id']}"):
-                st.session_state.challenge_mode = True
-                st.session_state.challenge_id = c["challenge_id"]
-                st.session_state.challenge_count = 0
-                st.session_state.challenge_correct = 0
-                st.session_state.active_domain = c["domain"]
-                st.session_state.active_difficulty = c["difficulty"]
-                st.success("Challenge attempt started!")
+
+            if challenge_done:
+                st.button(
+                    "✅ Challenge Over",
+                    key=f"start_done_{c['challenge_id']}",
+                    disabled=True
+                )
+            elif already_completed:
+                st.button(
+                    "✅ Already Completed",
+                    key=f"start_completed_{c['challenge_id']}",
+                    disabled=True
+                )
+            else:
+                if st.button(f"Start {c['challenge_id']}", key=f"start_{c['challenge_id']}"):
+                    st.session_state.challenge_mode = True
+                    st.session_state.challenge_id = c["challenge_id"]
+                    st.session_state.challenge_count = 0
+                    st.session_state.challenge_correct = 0
+                    st.session_state.active_domain = c["domain"]
+                    st.session_state.active_difficulty = c["difficulty"]
+                    st.session_state.answered = False
+                    st.session_state.answer_choice = None
+                    st.session_state.submit_locked = False
+                    st.session_state.question = None
+                    st.success("Challenge attempt started!")
 
 st.divider()
 
@@ -1354,16 +1427,18 @@ if st.button("Submit Answer", disabled=st.session_state.submit_locked or st.sess
                     challenge_row = current_snap.to_dict() if current_snap.exists else None
 
                     if challenge_row:
-                        if str(challenge_row.get("challenger", "")).strip().lower() == player_id_lower:
-                            update_challenge(cid, {"challenger_score": st.session_state.challenge_correct})
-                        elif str(challenge_row.get("opponent", "")).strip().lower() == player_id_lower:
-                            update_challenge(cid, {"opponent_score": st.session_state.challenge_correct})
+                        score_field = my_challenge_score_field(challenge_row, player_id_lower)
+
+                        if score_field and challenge_row.get(score_field) is None:
+                            update_challenge(cid, {score_field: st.session_state.challenge_correct})
 
                         refreshed_snap = challenge_ref(cid).get()
                         refreshed = refreshed_snap.to_dict() if refreshed_snap.exists else None
 
                         if refreshed and refreshed.get("challenger_score") is not None and refreshed.get("opponent_score") is not None:
-                            update_challenge(cid, {"status": "done"})
+                            if refreshed.get("status") != "done":
+                                update_challenge(cid, {"status": "done"})
+
                             final_snap = challenge_ref(cid).get()
                             final_row = final_snap.to_dict() if final_snap.exists else None
 
