@@ -1398,4 +1398,3 @@ if st.button("Submit Answer", disabled=st.session_state.submit_locked or st.sess
                 st.session_state.active_domain = None
                 st.session_state.active_difficulty = None
                 st.info("Challenge finished.")
-
