@@ -267,10 +267,13 @@ def load_challenges():
 
 @st.cache_data(ttl=20)
 def load_sessions():
-    docs = db().collection("sessions").order_by(
-        "timestamp_utc",
-        direction=firestore.Query.DESCENDING
-    ).limit(100).stream()
+    docs = (
+        db()
+        .collection("sessions")
+        .order_by("timestamp_utc", direction=firestore.Query.DESCENDING)
+        .limit(100)
+        .stream()
+    )
     return [doc.to_dict() or {} for doc in docs]
 
 
@@ -710,7 +713,6 @@ st.session_state.setdefault("score", 0)
 st.session_state.setdefault("total_answered", 0)
 st.session_state.setdefault("answered", False)
 st.session_state.setdefault("question", None)
-st.session_state.setdefault("answer_choice", None)
 st.session_state.setdefault("next_allowed_time", 0.0)
 st.session_state.setdefault("submit_locked", False)
 st.session_state.setdefault("question_token", "")
@@ -743,6 +745,9 @@ st.session_state.setdefault("session_logged", False)
 st.session_state.setdefault("xp_popup_text", "")
 st.session_state.setdefault("xp_popup_kind", "")
 st.session_state.setdefault("xp_popup_nonce", 0)
+
+st.session_state.setdefault("answer_widget_nonce", 0)
+st.session_state.setdefault("current_answer_widget_key", "answer_choice_0")
 
 # =================================================
 # CHECK FIRESTORE
@@ -1095,9 +1100,11 @@ def load_question(topic_: str, difficulty_: str):
     st.session_state.next_allowed_time = time.time() + max(COOLDOWN_SECONDS, 2)
     st.session_state.question = pick_question(topic_, difficulty_)
     st.session_state.answered = False
-    st.session_state.answer_choice = None
     st.session_state.submit_locked = False
     st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+
+    st.session_state.answer_widget_nonce += 1
+    st.session_state.current_answer_widget_key = f"answer_choice_{st.session_state.answer_widget_nonce}"
 
 
 def load_next_question_for_current_mode():
@@ -1164,6 +1171,7 @@ with left:
                 if st.button(f"Accept {c['challenge_id']}", key=f"accept_{c['challenge_id']}"):
                     try:
                         update_challenge(c["challenge_id"], {"status": "accepted"})
+                        c["status"] = "accepted"
                         start_challenge_attempt(c)
                         st.success("Challenge accepted!")
                         st.rerun()
@@ -1288,7 +1296,10 @@ if st.session_state.is_teacher:
             st.session_state.is_generating = False
 
     with t3:
-        if st.button(f"🚀 Generate {ALL_DOMAINS_TARGET} for EVERY domain ({difficulty})", key="teacher_generate_all_domains_btn"):
+        if st.button(
+            f"🚀 Generate {ALL_DOMAINS_TARGET} for EVERY domain ({difficulty})",
+            key="teacher_generate_all_domains_btn"
+        ):
             st.session_state.is_generating = True
             total = 0
             failures = []
@@ -1375,21 +1386,25 @@ st.markdown(f"**B)** {q['B']}")
 st.markdown(f"**C)** {q['C']}")
 st.markdown(f"**D)** {q['D']}")
 
+current_answer_widget_key = st.session_state.current_answer_widget_key
+
 st.radio(
     "Answer",
     ["A", "B", "C", "D"],
     index=None,
     horizontal=True,
-    key="answer_choice",
+    key=current_answer_widget_key,
     disabled=st.session_state.answered
 )
+
+selected_answer = st.session_state.get(current_answer_widget_key, None)
 
 if st.button(
     "Submit Answer",
     disabled=st.session_state.submit_locked or st.session_state.answered,
     key="submit_answer_btn"
 ):
-    if st.session_state.answer_choice is None:
+    if selected_answer is None:
         st.warning("Select an answer first.")
     elif st.session_state.answered:
         st.warning("Already submitted.")
@@ -1404,7 +1419,7 @@ if st.button(
         st.session_state.answered = True
         st.session_state.total_answered += 1
 
-        correct = (st.session_state.answer_choice == q["correct"])
+        correct = (selected_answer == q["correct"])
 
         if correct:
             streak_before = safe_int(me.get("streak", 0))
@@ -1496,22 +1511,22 @@ if st.button(
                             final_row = final_snap.to_dict() if final_snap.exists else None
 
                             if final_row:
-                                c = final_row["challenger"]
-                                o = final_row["opponent"]
+                                c_name = final_row["challenger"]
+                                o_name = final_row["opponent"]
                                 cs = safe_int(final_row.get("challenger_score", 0))
                                 os_ = safe_int(final_row.get("opponent_score", 0))
 
                                 if cs > os_:
-                                    add_xp_and_streak(c, XP_WIN, 0, win_delta=1)
-                                    add_xp_and_streak(o, XP_LOSS, 0, loss_delta=1)
-                                    st.success(f"🏆 {c} wins! ({cs} vs {os_})")
+                                    add_xp_and_streak(c_name, XP_WIN, 0, win_delta=1)
+                                    add_xp_and_streak(o_name, XP_LOSS, 0, loss_delta=1)
+                                    st.success(f"🏆 {c_name} wins! ({cs} vs {os_})")
                                 elif os_ > cs:
-                                    add_xp_and_streak(o, XP_WIN, 0, win_delta=1)
-                                    add_xp_and_streak(c, XP_LOSS, 0, loss_delta=1)
-                                    st.success(f"🏆 {o} wins! ({os_} vs {cs})")
+                                    add_xp_and_streak(o_name, XP_WIN, 0, win_delta=1)
+                                    add_xp_and_streak(c_name, XP_LOSS, 0, loss_delta=1)
+                                    st.success(f"🏆 {o_name} wins! ({os_} vs {cs})")
                                 else:
-                                    add_xp_and_streak(c, XP_DRAW, 0)
-                                    add_xp_and_streak(o, XP_DRAW, 0)
+                                    add_xp_and_streak(c_name, XP_DRAW, 0)
+                                    add_xp_and_streak(o_name, XP_DRAW, 0)
                                     st.success(f"🤝 Draw! ({cs} vs {os_})")
                         else:
                             st.success("✅ Challenge attempt submitted! Waiting for the other student.")
