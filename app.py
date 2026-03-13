@@ -635,6 +635,91 @@ def show_xp_popup():
     )
 
 
+def show_challenge_result_popup():
+    popup_text = st.session_state.get("challenge_result_popup_text", "").strip()
+    popup_kind = st.session_state.get("challenge_result_popup_kind", "")
+    popup_nonce = st.session_state.get("challenge_result_popup_nonce", 0)
+
+    if not popup_text:
+        return
+
+    if popup_kind == "win":
+        bg = "linear-gradient(180deg, #22c55e, #15803d)"
+        border = "#14532d"
+        emoji = "🏆"
+    elif popup_kind == "loss":
+        bg = "linear-gradient(180deg, #ef4444, #b91c1c)"
+        border = "#7f1d1d"
+        emoji = "💀"
+    else:
+        bg = "linear-gradient(180deg, #f59e0b, #d97706)"
+        border = "#92400e"
+        emoji = "🤝"
+
+    st.markdown(
+        f"""
+        <style>
+        @keyframes challengeResultFade-{popup_nonce} {{
+            0% {{
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(0.88);
+            }}
+            10% {{
+                opacity: 1;
+                transform: translate(-50%, -50%) scale(1.02);
+            }}
+            85% {{
+                opacity: 1;
+                transform: translate(-50%, -50%) scale(1.0);
+            }}
+            100% {{
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(0.94);
+            }}
+        }}
+
+        .challenge-result-popup-{popup_nonce} {{
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10000;
+            min-width: 320px;
+            max-width: 90vw;
+            padding: 28px 26px;
+            border-radius: 24px;
+            color: white;
+            font-weight: 900;
+            text-align: center;
+            background: {bg};
+            border: 4px solid {border};
+            box-shadow: 0 24px 60px rgba(0,0,0,0.35);
+            animation: challengeResultFade-{popup_nonce} 3.2s ease-out forwards;
+            pointer-events: none;
+        }}
+
+        .challenge-result-popup-{popup_nonce} .icon {{
+            font-size: 54px;
+            line-height: 1;
+            margin-bottom: 10px;
+        }}
+
+        .challenge-result-popup-{popup_nonce} .text {{
+            font-size: 34px;
+            line-height: 1.15;
+            white-space: pre-line;
+        }}
+        </style>
+
+        <div class="challenge-result-popup-{popup_nonce}">
+            <div class="icon">{emoji}</div>
+            <div class="text">{popup_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # =================================================
 # COMBO METER
 # =================================================
@@ -770,6 +855,10 @@ st.session_state.setdefault("session_logged", False)
 st.session_state.setdefault("xp_popup_text", "")
 st.session_state.setdefault("xp_popup_kind", "")
 st.session_state.setdefault("xp_popup_nonce", 0)
+
+st.session_state.setdefault("challenge_result_popup_text", "")
+st.session_state.setdefault("challenge_result_popup_kind", "")
+st.session_state.setdefault("challenge_result_popup_nonce", 0)
 
 st.session_state.setdefault("answer_widget_nonce", 0)
 st.session_state.setdefault("current_answer_widget_key", "answer_choice_0")
@@ -921,6 +1010,7 @@ me = next(
 my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
 
 show_xp_popup()
+show_challenge_result_popup()
 
 # =================================================
 # LEADERBOARD
@@ -1588,14 +1678,38 @@ if st.button(
                                     add_xp_and_streak(c_name, XP_WIN, 0, win_delta=1)
                                     add_xp_and_streak(o_name, XP_LOSS, 0, loss_delta=1)
                                     st.success(f"🏆 {c_name} wins! ({cs} vs {os_})")
+
+                                    if player_id_lower == str(c_name).strip().lower():
+                                        st.session_state.challenge_result_popup_text = "YOU WON!"
+                                        st.session_state.challenge_result_popup_kind = "win"
+                                    else:
+                                        st.session_state.challenge_result_popup_text = "YOU LOST"
+                                        st.session_state.challenge_result_popup_kind = "loss"
+
+                                    st.session_state.challenge_result_popup_nonce += 1
+
                                 elif os_ > cs:
                                     add_xp_and_streak(o_name, XP_WIN, 0, win_delta=1)
                                     add_xp_and_streak(c_name, XP_LOSS, 0, loss_delta=1)
                                     st.success(f"🏆 {o_name} wins! ({os_} vs {cs})")
+
+                                    if player_id_lower == str(o_name).strip().lower():
+                                        st.session_state.challenge_result_popup_text = "YOU WON!"
+                                        st.session_state.challenge_result_popup_kind = "win"
+                                    else:
+                                        st.session_state.challenge_result_popup_text = "YOU LOST"
+                                        st.session_state.challenge_result_popup_kind = "loss"
+
+                                    st.session_state.challenge_result_popup_nonce += 1
+
                                 else:
                                     add_xp_and_streak(c_name, XP_DRAW, 0)
                                     add_xp_and_streak(o_name, XP_DRAW, 0)
                                     st.success(f"🤝 Draw! ({cs} vs {os_})")
+
+                                    st.session_state.challenge_result_popup_text = "TIE GAME"
+                                    st.session_state.challenge_result_popup_kind = "tie"
+                                    st.session_state.challenge_result_popup_nonce += 1
                         else:
                             st.success("✅ Challenge attempt submitted! Waiting for the other student.")
                 except Exception as e:
