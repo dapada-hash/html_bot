@@ -258,7 +258,7 @@ def firestore_enabled():
 # =================================================
 # FIRESTORE READ LAYER
 # =================================================
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=60)
 def load_players():
     docs = db().collection("players").stream()
     rows = []
@@ -270,7 +270,7 @@ def load_players():
     return rows
 
 
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=60)
 def load_challenges():
     docs = db().collection("challenges").stream()
     rows = []
@@ -282,7 +282,7 @@ def load_challenges():
     return rows
 
 
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=60)
 def load_sessions():
     docs = (
         db()
@@ -310,7 +310,7 @@ def get_app_data():
     if (
         not st.session_state.leaderboard_cache
         or not st.session_state.challenge_cache
-        or now_ts - st.session_state.last_db_sync > 20
+        or now_ts - st.session_state.last_db_sync > 60
     ):
         st.session_state.leaderboard_cache = load_players()
         st.session_state.challenge_cache = load_challenges()
@@ -863,6 +863,9 @@ st.session_state.setdefault("challenge_result_popup_nonce", 0)
 st.session_state.setdefault("answer_widget_nonce", 0)
 st.session_state.setdefault("current_answer_widget_key", "answer_choice_0")
 
+st.session_state.setdefault("last_synced_player_id", "")
+st.session_state.setdefault("last_synced_period", "")
+
 # =================================================
 # CHECK FIRESTORE
 # =================================================
@@ -947,12 +950,12 @@ if st.session_state.get("is_teacher", False):
 else:
     student_live_refresh = st.sidebar.checkbox(
         "Auto-refresh challenges",
-        value=True,
+        value=False,
         key="student_live_refresh_checkbox"
     )
     student_refresh_seconds = st.sidebar.selectbox(
         "Challenge refresh speed",
-        [5, 8, 10, 15],
+        [15, 30, 60],
         index=1,
         key="student_refresh_speed_select"
     )
@@ -972,11 +975,20 @@ if not firestore_enabled():
     st.code(st.session_state.get("firebase_error", "Unknown Firebase error"))
     st.stop()
 
-try:
-    upsert_player(st.session_state.player_id, st.session_state.student_period)
-except Exception as e:
-    st.warning("Could not sync your player record.")
-    st.code(str(e))
+if (
+    st.session_state.player_id
+    and (
+        st.session_state.last_synced_player_id != st.session_state.player_id
+        or st.session_state.last_synced_period != st.session_state.student_period
+    )
+):
+    try:
+        upsert_player(st.session_state.player_id, st.session_state.student_period)
+        st.session_state.last_synced_player_id = st.session_state.player_id
+        st.session_state.last_synced_period = st.session_state.student_period
+    except Exception as e:
+        st.warning("Could not sync your player record.")
+        st.code(str(e))
 
 st.sidebar.divider()
 st.sidebar.header("Quiz Settings")
