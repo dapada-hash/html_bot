@@ -1165,6 +1165,11 @@ def load_next_question_for_current_mode():
 
 
 def start_challenge_attempt(challenge_row: dict):
+    status = str(challenge_row.get("status", "")).strip().lower()
+
+    if status != "accepted":
+        raise ValueError("This challenge cannot start until the opponent accepts it.")
+
     st.session_state.challenge_mode = True
     st.session_state.challenge_id = challenge_row["challenge_id"]
     st.session_state.challenge_count = 0
@@ -1204,12 +1209,13 @@ with left:
         for c in incoming:
             already_completed = my_challenge_already_completed(c, player_id_lower)
             challenge_done = c.get("status") == "done"
+            status = str(c.get("status", "")).strip().lower()
 
             st.write(
                 f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
             )
 
-            if c["status"] == "pending":
+            if status == "pending":
                 if st.button(f"Accept {c['challenge_id']}", key=f"accept_{c['challenge_id']}"):
                     try:
                         update_challenge(c["challenge_id"], {"status": "accepted"})
@@ -1227,17 +1233,23 @@ with left:
                     key=f"incoming_done_{c['challenge_id']}",
                     disabled=True
                 )
+
             elif already_completed:
                 st.button(
                     "✅ Already Completed",
                     key=f"incoming_completed_{c['challenge_id']}",
                     disabled=True
                 )
-            else:
+
+            elif status == "accepted":
                 if st.button(f"Start {c['challenge_id']}", key=f"incoming_start_{c['challenge_id']}"):
-                    start_challenge_attempt(c)
-                    st.success("Challenge attempt started!")
-                    st.rerun()
+                    try:
+                        start_challenge_attempt(c)
+                        st.success("Challenge attempt started!")
+                        st.rerun()
+                    except Exception as e:
+                        st.warning("Could not start challenge.")
+                        st.code(str(e))
 
 with right:
     st.markdown("### Sent")
@@ -1247,6 +1259,7 @@ with right:
         for c in outgoing:
             already_completed = my_challenge_already_completed(c, player_id_lower)
             challenge_done = c.get("status") == "done"
+            status = str(c.get("status", "")).strip().lower()
 
             st.write(
                 f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
@@ -1258,17 +1271,30 @@ with right:
                     key=f"start_done_{c['challenge_id']}",
                     disabled=True
                 )
+
             elif already_completed:
                 st.button(
                     "✅ Already Completed",
                     key=f"start_completed_{c['challenge_id']}",
                     disabled=True
                 )
-            else:
+
+            elif status == "pending":
+                st.button(
+                    "⏳ Waiting for opponent",
+                    key=f"waiting_{c['challenge_id']}",
+                    disabled=True
+                )
+
+            elif status == "accepted":
                 if st.button(f"Start {c['challenge_id']}", key=f"start_{c['challenge_id']}"):
-                    start_challenge_attempt(c)
-                    st.success("Challenge attempt started!")
-                    st.rerun()
+                    try:
+                        start_challenge_attempt(c)
+                        st.success("Challenge attempt started!")
+                        st.rerun()
+                    except Exception as e:
+                        st.warning("Could not start challenge.")
+                        st.code(str(e))
 
 st.divider()
 
