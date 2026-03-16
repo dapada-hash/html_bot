@@ -6,11 +6,12 @@ import time
 import threading
 from datetime import datetime
 
+import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from google import genai
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, auth as firebase_auth
 
 # =================================================
 # PAGE CONFIG
@@ -48,13 +49,20 @@ API_KEY = (
     or ""
 )
 
-TEACHER_PIN = (
-    read_secret("TEACHER_PIN")
-    or read_env("TEACHER_PIN")
-    or "1234"
+FIREBASE_SERVICE_ACCOUNT_JSON = read_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
+
+FIREBASE_WEB_API_KEY = (
+    read_secret("FIREBASE_WEB_API_KEY")
+    or read_env("FIREBASE_WEB_API_KEY")
+    or ""
 )
 
-FIREBASE_SERVICE_ACCOUNT_JSON = read_secret("FIREBASE_SERVICE_ACCOUNT_JSON", None)
+TEACHER_EMAILS_RAW = (
+    read_secret("TEACHER_EMAILS")
+    or read_env("TEACHER_EMAILS")
+    or ""
+)
+
 MODEL = "gemini-2.5-flash"
 
 BATCH_SIZE = 25
@@ -168,6 +176,13 @@ def firebase_config_present() -> bool:
     return bool(FIREBASE_SERVICE_ACCOUNT_JSON and str(FIREBASE_SERVICE_ACCOUNT_JSON).strip())
 
 
+def get_teacher_emails():
+    raw = str(TEACHER_EMAILS_RAW or "").strip()
+    if not raw:
+        return set()
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
 def my_challenge_score_field(challenge_row: dict, player_id_lower_: str):
     challenger_name = str(challenge_row.get("challenger", "")).strip().lower()
     opponent_name = str(challenge_row.get("opponent", "")).strip().lower()
@@ -253,6 +268,76 @@ def challenge_ref(challenge_id: str):
 
 def firestore_enabled():
     return st.session_state.get("firebase_ok", False)
+
+
+# =================================================
+# AUTH
+# =================================================
+def firebase_sign_in_email_password(email: str, password: str):
+    if not FIREBASE_WEB_API_KEY.strip():
+        raise ValueError("Missing FIREBASE_WEB_API_KEY in secrets.")
+
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
+        f"?key={FIREBASE_WEB_API_KEY}"
+    )
+    payload = {
+        "email": email,
+        "password": password,
+        "returnSecureToken": True,
+    }
+
+    resp = requests.post(url, json=payload, timeout=20)
+    data = resp.json()
+
+    if resp.status_code != 200:
+        err_msg = data.get("error", {}).get("message", "Authentication failed.")
+        raise ValueError(err_msg)
+
+    id_token = data.get("idToken", "")
+    refresh_token = data.get("refreshToken", "")
+    local_id = data.get("localId", "")
+
+    if not id_token:
+        raise ValueError("No Firebase ID token returned.")
+
+    return {
+        "id_token": id_token,
+        "refresh_token": refresh_token,
+        "local_id": local_id,
+    }
+
+
+def verify_firebase_id_token(id_token: str):
+    decoded = firebase_auth.verify_id_token(id_token)
+    return decoded
+
+
+def sign_out():
+    st.session_state.auth_verified = False
+    st.session_state.auth_user = None
+    st.session_state.auth_id_token = ""
+    st.session_state.auth_refresh_token = ""
+    st.session_state.firebase_ok = False
+    st.session_state.firebase_error = ""
+
+    st.session_state.challenge_mode = False
+    st.session_state.challenge_id = None
+    st.session_state.challenge_count = 0
+    st.session_state.challenge_correct = 0
+    st.session_state.active_domain = None
+    st.session_state.active_difficulty = None
+    st.session_state.id_locked = False
+
+    st.session_state.first_name = ""
+    st.session_state.student_id = ""
+    st.session_state.player_id = ""
+    st.session_state.last_synced_player_id = ""
+    st.session_state.last_synced_period = ""
+
+    st.session_state.leaderboard_cache = []
+    st.session_state.challenge_cache = []
+    st.session_state.last_db_sync = 0
 
 
 # =================================================
@@ -866,15 +951,75 @@ st.session_state.setdefault("current_answer_widget_key", "answer_choice_0")
 st.session_state.setdefault("last_synced_player_id", "")
 st.session_state.setdefault("last_synced_period", "")
 
+st.session_state.setdefault("auth_verified", False)
+st.session_state.setdefault("auth_user", None)
+st.session_state.setdefault("auth_id_token", "")
+st.session_state.setdefault("auth_refresh_token", "")
+
 # =================================================
-# CHECK FIRESTORE
+# AUTH GATE - BEFORE ANY FIRESTORE READ / WRITE
+# =================================================
+with st.sidebar:
+    st.header("Firebase Sign In")
+
+    if not st.session_state.auth_verified:
+        with st.form("firebase_login_form"):
+            login_email = st.text_input("Email", key="auth_email_input")
+            login_password = st.text_input("Password", type="password", key="auth_password_input")
+            login_submit = st.form_submit_button("Sign In")
+
+        if login_submit:
+            try:
+                sign_in_result = firebase_sign_in_email_password(
+                    login_email.strip(),
+                    login_password
+                )
+                decoded = verify_firebase_id_token(sign_in_result["id_token"])
+
+                email = str(decoded.get("email", "")).strip().lower()
+                teacher_emails = get_teacher_emails()
+
+                st.session_state.auth_verified = True
+                st.session_state.auth_id_token = sign_in_result["id_token"]
+                st.session_state.auth_refresh_token = sign_in_result["refresh_token"]
+                st.session_state.auth_user = {
+                    "uid": decoded.get("uid", ""),
+                    "email": email,
+                    "email_verified": bool(decoded.get("email_verified", False)),
+                    "is_teacher": email in teacher_emails,
+                }
+                st.session_state.is_teacher = email in teacher_emails
+
+                st.success("Signed in successfully.")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+        st.info("Sign in to access the app.")
+        st.stop()
+
+    auth_user = st.session_state.auth_user or {}
+    st.success(f"Signed in as: {auth_user.get('email', 'unknown')}")
+    st.caption("Teacher" if auth_user.get("is_teacher") else "Student")
+
+    if st.button("Sign Out", key="sign_out_btn"):
+        sign_out()
+        st.rerun()
+
+# =================================================
+# CHECK FIRESTORE - ONLY AFTER AUTH
 # =================================================
 firebase_ok, firebase_err = check_firestore()
 st.session_state["firebase_ok"] = firebase_ok
 st.session_state["firebase_error"] = firebase_err
 
+if not firestore_enabled():
+    st.warning("Firebase is not available.")
+    st.code(st.session_state.get("firebase_error", "Unknown Firebase error"))
+    st.stop()
+
 # =================================================
-# LOGIN / TEACHER MODE FIRST
+# IN-APP STUDENT IDENTITY
 # =================================================
 st.sidebar.header("Student Login (FirstName-ID)")
 
@@ -912,19 +1057,36 @@ st.session_state.student_period = st.sidebar.selectbox(
     key="sidebar_student_period_select"
 )
 
-with st.sidebar.expander("🔒 Teacher Panel"):
-    pin_input = st.text_input("Teacher PIN", type="password", key="teacher_pin_input")
-    tc1, tc2 = st.columns(2)
+if not st.session_state.player_id:
+    st.warning("Enter First Name + numeric Student ID to start.")
+    st.stop()
 
-    with tc1:
-        if st.button("Unlock Teacher", key="unlock_teacher_btn"):
-            st.session_state.is_teacher = (pin_input == str(TEACHER_PIN))
-            st.success("Teacher mode ON ✅" if st.session_state.is_teacher else "Wrong PIN ❌")
+if (
+    st.session_state.player_id
+    and (
+        st.session_state.last_synced_player_id != st.session_state.player_id
+        or st.session_state.last_synced_period != st.session_state.student_period
+    )
+):
+    try:
+        upsert_player(st.session_state.player_id, st.session_state.student_period)
+        st.session_state.last_synced_player_id = st.session_state.player_id
+        st.session_state.last_synced_period = st.session_state.student_period
+    except Exception as e:
+        st.warning("Could not sync your player record.")
+        st.code(str(e))
 
-    with tc2:
-        if st.button("Lock Teacher", key="lock_teacher_btn"):
-            st.session_state.is_teacher = False
-            st.info("Teacher mode OFF")
+st.sidebar.divider()
+st.sidebar.header("Quiz Settings")
+topic = st.sidebar.selectbox("Domain", DOMAINS, key="sidebar_domain_select")
+difficulty = st.sidebar.selectbox("Difficulty", ["Easy", "Medium", "Hard"], key="sidebar_difficulty_select")
+st.sidebar.caption(f"Shared bank for this domain: {bank_size(topic, difficulty)}")
+
+lu = bank_last_updated(topic, difficulty)
+if lu:
+    st.sidebar.caption(f"Last teacher refill (UTC): {lu}")
+
+st.sidebar.success("✅ Persistent mode: Firebase Firestore")
 
 # =================================================
 # AUTO REFRESH
@@ -965,42 +1127,6 @@ else:
         st.sidebar.caption(f"🔄 Student refresh every {student_refresh_seconds} seconds")
     else:
         st.sidebar.caption("Student auto-refresh paused during active challenge")
-
-if not st.session_state.player_id:
-    st.warning("Enter First Name + numeric Student ID to start.")
-    st.stop()
-
-if not firestore_enabled():
-    st.warning("Firebase is not available.")
-    st.code(st.session_state.get("firebase_error", "Unknown Firebase error"))
-    st.stop()
-
-if (
-    st.session_state.player_id
-    and (
-        st.session_state.last_synced_player_id != st.session_state.player_id
-        or st.session_state.last_synced_period != st.session_state.student_period
-    )
-):
-    try:
-        upsert_player(st.session_state.player_id, st.session_state.student_period)
-        st.session_state.last_synced_player_id = st.session_state.player_id
-        st.session_state.last_synced_period = st.session_state.student_period
-    except Exception as e:
-        st.warning("Could not sync your player record.")
-        st.code(str(e))
-
-st.sidebar.divider()
-st.sidebar.header("Quiz Settings")
-topic = st.sidebar.selectbox("Domain", DOMAINS, key="sidebar_domain_select")
-difficulty = st.sidebar.selectbox("Difficulty", ["Easy", "Medium", "Hard"], key="sidebar_difficulty_select")
-st.sidebar.caption(f"Shared bank for this domain: {bank_size(topic, difficulty)}")
-
-lu = bank_last_updated(topic, difficulty)
-if lu:
-    st.sidebar.caption(f"Last teacher refill (UTC): {lu}")
-
-st.sidebar.success("✅ Persistent mode: Firebase Firestore")
 
 # =================================================
 # SINGLE DATA FETCH
