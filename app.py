@@ -9,10 +9,17 @@ from datetime import datetime
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-from st_cookies_manager import EncryptedCookieManager
 from google import genai
 import firebase_admin
 from firebase_admin import credentials, firestore, auth as firebase_auth
+
+# Optional cookie package
+COOKIE_MANAGER_AVAILABLE = True
+try:
+    from st_cookies_manager import EncryptedCookieManager
+except Exception:
+    COOKIE_MANAGER_AVAILABLE = False
+    EncryptedCookieManager = None
 
 # =================================================
 # PAGE CONFIG
@@ -94,13 +101,17 @@ MAX_CHALLENGE_HISTORY_PER_COLUMN = 2
 # =================================================
 # COOKIES
 # =================================================
-cookies = EncryptedCookieManager(
-    prefix="html_arena_",
-    password=COOKIE_PASSWORD,
-)
-
-if not cookies.ready():
-    st.stop()
+cookies = None
+if COOKIE_MANAGER_AVAILABLE:
+    try:
+        cookies = EncryptedCookieManager(
+            prefix="html_arena_",
+            password=COOKIE_PASSWORD,
+        )
+        if not cookies.ready():
+            st.stop()
+    except Exception:
+        cookies = None
 
 # =================================================
 # DOMAINS
@@ -181,10 +192,12 @@ def parse_service_account(raw_value):
 
     if isinstance(raw_value, str):
         cleaned = raw_value.strip()
+
         if cleaned.startswith("'''") and cleaned.endswith("'''"):
             cleaned = cleaned[3:-3].strip()
         elif cleaned.startswith('"""') and cleaned.endswith('"""'):
             cleaned = cleaned[3:-3].strip()
+
         return json.loads(cleaned)
 
     raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON must be a JSON string or dict.")
@@ -247,7 +260,7 @@ def player_has_active_challenge(player_id_value: str, challenges: list) -> bool:
 def get_firestore_client():
     creds_dict = parse_service_account(FIREBASE_SERVICE_ACCOUNT_JSON)
     if not creds_dict:
-        raise ValueError("Firebase service account credentials are missing.")
+        raise ValueError("Missing FIREBASE_SERVICE_ACCOUNT_JSON in secrets.")
 
     if not firebase_admin._apps:
         cred = credentials.Certificate(creds_dict)
@@ -295,6 +308,9 @@ def firebase_sign_in_email_password(email: str, password: str):
     if not FIREBASE_WEB_API_KEY.strip():
         raise ValueError("Missing FIREBASE_WEB_API_KEY in secrets.")
 
+    # Make sure Admin SDK is initialized before using firebase_auth functions
+    get_firestore_client()
+
     url = (
         "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
         f"?key={FIREBASE_WEB_API_KEY}"
@@ -327,10 +343,12 @@ def firebase_sign_in_email_password(email: str, password: str):
 
 
 def verify_firebase_id_token(id_token: str):
+    get_firestore_client()
     return firebase_auth.verify_id_token(id_token)
 
 
 def create_firebase_session_cookie(id_token: str, expires_days: int = 5):
+    get_firestore_client()
     expires_in_seconds = expires_days * 24 * 60 * 60
     return firebase_auth.create_session_cookie(
         id_token,
@@ -339,10 +357,14 @@ def create_firebase_session_cookie(id_token: str, expires_days: int = 5):
 
 
 def verify_firebase_session_cookie(session_cookie: str):
+    get_firestore_client()
     return firebase_auth.verify_session_cookie(session_cookie, check_revoked=True)
 
 
 def restore_auth_from_cookie():
+    if cookies is None:
+        return False
+
     session_cookie = cookies.get("firebase_session", "")
     if not session_cookie:
         return False
@@ -368,6 +390,8 @@ def restore_auth_from_cookie():
 
 
 def persist_auth_cookie(id_token: str):
+    if cookies is None:
+        return
     session_cookie = create_firebase_session_cookie(id_token, expires_days=5)
     cookies["firebase_session"] = session_cookie
     cookies.save()
@@ -399,8 +423,9 @@ def sign_out():
     st.session_state.challenge_cache = []
     st.session_state.last_db_sync = 0
 
-    cookies["firebase_session"] = ""
-    cookies.save()
+    if cookies is not None:
+        cookies["firebase_session"] = ""
+        cookies.save()
 
 
 # =================================================
@@ -506,6 +531,8 @@ def create_student_account_and_profile(
     period: str,
     active: bool = True,
 ):
+    get_firestore_client()
+
     email = email.strip().lower()
     first_name = first_name.strip()
     student_id = str(student_id).strip()
@@ -1175,6 +1202,9 @@ if not st.session_state.auth_verified:
 # =================================================
 with st.sidebar:
     st.header("Firebase Sign In")
+
+    if cookies is None:
+        st.caption("Persistent cookies unavailable. Login will work for the current session only.")
 
     if not st.session_state.auth_verified:
         with st.form("firebase_login_form"):
