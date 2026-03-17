@@ -1,6 +1,6 @@
 streamlit
-requests
+
 firebase-admin
 google-genai
 streamlit-autorefresh
-st-cookies-manager==0.2.2
+
