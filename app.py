@@ -379,10 +379,22 @@ def load_sessions():
     return [doc.to_dict() or {} for doc in docs]
 
 
+@st.cache_data(ttl=60)
+def load_student_profiles():
+    docs = db().collection("student_profiles").stream()
+    rows = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data["uid"] = doc.id
+        rows.append(data)
+    return rows
+
+
 def clear_db_caches():
     load_players.clear()
     load_challenges.clear()
     load_sessions.clear()
+    load_student_profiles.clear()
 
 
 def mark_db_data_stale():
@@ -402,6 +414,139 @@ def get_app_data():
         st.session_state.last_db_sync = now_ts
 
     return st.session_state.leaderboard_cache, st.session_state.challenge_cache
+
+
+# =================================================
+# STUDENT PROFILE HELPERS
+# =================================================
+def get_student_profile(uid: str):
+    if not uid:
+        return None
+
+    snap = db().collection("student_profiles").document(uid).get()
+    if not snap.exists:
+        return None
+
+    data = snap.to_dict() or {}
+    if not data.get("active", True):
+        return None
+
+    data["uid"] = snap.id
+    return data
+
+
+def create_student_account_and_profile(
+    email: str,
+    password: str,
+    first_name: str,
+    student_id: str,
+    period: str,
+    active: bool = True,
+):
+    email = email.strip().lower()
+    first_name = first_name.strip()
+    student_id = str(student_id).strip()
+    period = period.strip()
+
+    if not email:
+        raise ValueError("Student email is required.")
+    if not password or len(password) < 6:
+        raise ValueError("Password must be at least 6 characters.")
+    if not first_name:
+        raise ValueError("First name is required.")
+    if not student_id.isdigit():
+        raise ValueError("Student ID must be numeric.")
+    if not period:
+        raise ValueError("Period is required.")
+
+    existing_profiles = db().collection("student_profiles").where("student_id", "==", student_id).limit(1).stream()
+    if any(True for _ in existing_profiles):
+        raise ValueError(f"Student ID {student_id} already exists.")
+
+    existing_email_profiles = db().collection("student_profiles").where("email", "==", email).limit(1).stream()
+    if any(True for _ in existing_email_profiles):
+        raise ValueError(f"Email {email} already exists in student profiles.")
+
+    user = firebase_auth.create_user(
+        email=email,
+        password=password,
+    )
+    uid = user.uid
+
+    db().collection("student_profiles").document(uid).set({
+        "uid": uid,
+        "email": email,
+        "first_name": first_name,
+        "student_id": student_id,
+        "period": period,
+        "display_name": f"{first_name}-{student_id}",
+        "active": bool(active),
+        "created_utc": now_utc(),
+    })
+
+    clear_db_caches()
+    mark_db_data_stale()
+
+    return {
+        "uid": uid,
+        "email": email,
+        "display_name": f"{first_name}-{student_id}",
+    }
+
+
+def update_student_profile(uid: str, first_name: str, student_id: str, period: str, active: bool):
+    uid = str(uid).strip()
+    first_name = first_name.strip()
+    student_id = str(student_id).strip()
+    period = period.strip()
+
+    if not uid:
+        raise ValueError("UID is required.")
+    if not first_name:
+        raise ValueError("First name is required.")
+    if not student_id.isdigit():
+        raise ValueError("Student ID must be numeric.")
+    if not period:
+        raise ValueError("Period is required.")
+
+    snap = db().collection("student_profiles").document(uid).get()
+    if not snap.exists:
+        raise ValueError("Student profile not found.")
+
+    current = snap.to_dict() or {}
+
+    dup_student_id = db().collection("student_profiles").where("student_id", "==", student_id).limit(10).stream()
+    for doc in dup_student_id:
+        if doc.id != uid:
+            raise ValueError(f"Student ID {student_id} already exists.")
+
+    db().collection("student_profiles").document(uid).set({
+        "uid": uid,
+        "email": current.get("email", ""),
+        "first_name": first_name,
+        "student_id": student_id,
+        "period": period,
+        "display_name": f"{first_name}-{student_id}",
+        "active": bool(active),
+        "updated_utc": now_utc(),
+    }, merge=True)
+
+    clear_db_caches()
+    mark_db_data_stale()
+
+
+def set_student_profile_active(uid: str, active: bool):
+    uid = str(uid).strip()
+    if not uid:
+        raise ValueError("UID is required.")
+
+    db().collection("student_profiles").document(uid).set({
+        "active": bool(active),
+        "updated_utc": now_utc(),
+    }, merge=True)
+
+    clear_db_caches()
+    mark_db_data_stale()
 
 
 # =================================================
@@ -1019,48 +1164,74 @@ if not firestore_enabled():
     st.stop()
 
 # =================================================
-# IN-APP STUDENT IDENTITY
+# LOAD LOCKED PROFILE FOR STUDENTS
 # =================================================
-st.sidebar.header("Student Login (FirstName-ID)")
+auth_user = st.session_state.auth_user or {}
+auth_uid = str(auth_user.get("uid", "")).strip()
+is_teacher_user = bool(auth_user.get("is_teacher", False))
 
-st.session_state.first_name = st.sidebar.text_input(
-    "First Name",
-    value=st.session_state.first_name,
-    disabled=st.session_state.id_locked,
-    key="sidebar_first_name_input"
-)
+if not is_teacher_user:
+    profile = get_student_profile(auth_uid)
+    if not profile:
+        st.error("No active student profile found for this account.")
+        st.stop()
 
-st.session_state.student_id = st.sidebar.text_input(
-    "Student ID (numbers only)",
-    value=st.session_state.student_id,
-    disabled=st.session_state.id_locked,
-    key="sidebar_student_id_input"
-)
+    st.session_state.first_name = profile.get("first_name", "")
+    st.session_state.student_id = str(profile.get("student_id", ""))
+    st.session_state.student_period = profile.get("period", "Other")
+    st.session_state.player_id = f"{st.session_state.first_name}-{st.session_state.student_id}"
+    st.session_state.id_locked = True
 
-player_id = ""
-if st.session_state.first_name.strip() and st.session_state.student_id.strip():
-    if not st.session_state.student_id.strip().isdigit():
-        st.sidebar.error("Student ID must be numbers only.")
+# =================================================
+# IN-APP IDENTITY UI
+# =================================================
+st.sidebar.header("Student Identity")
+
+if is_teacher_user:
+    st.sidebar.info("Teacher account")
+    st.session_state.first_name = st.sidebar.text_input(
+        "Preview First Name",
+        value=st.session_state.first_name,
+        disabled=False,
+        key="sidebar_first_name_input"
+    )
+    st.session_state.student_id = st.sidebar.text_input(
+        "Preview Student ID (numbers only)",
+        value=st.session_state.student_id,
+        disabled=False,
+        key="sidebar_student_id_input"
+    )
+
+    teacher_period_options = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"]
+    st.session_state.student_period = st.sidebar.selectbox(
+        "Preview Class / Period",
+        teacher_period_options,
+        index=teacher_period_options.index(st.session_state.student_period)
+        if st.session_state.student_period in teacher_period_options
+        else 0,
+        key="sidebar_student_period_select"
+    )
+
+    teacher_preview_player_id = ""
+    if st.session_state.first_name.strip() and st.session_state.student_id.strip() and st.session_state.student_id.strip().isdigit():
+        teacher_preview_player_id = f"{st.session_state.first_name.strip()}-{st.session_state.student_id.strip()}"
+        st.sidebar.success(f"Preview Player ID: {teacher_preview_player_id}")
+        st.session_state.player_id = teacher_preview_player_id
     else:
-        player_id = f"{st.session_state.first_name.strip()}-{st.session_state.student_id.strip()}"
-        st.sidebar.success(f"✅ Player ID: {player_id}")
+        st.sidebar.caption("Teacher can preview a player identity here if needed.")
+else:
+    st.sidebar.write(f"**First Name:** {st.session_state.first_name}")
+    st.sidebar.write(f"**Student ID:** {st.session_state.student_id}")
+    st.sidebar.write(f"**Class / Period:** {st.session_state.student_period}")
+    st.sidebar.success(f"✅ Player ID: {st.session_state.player_id}")
 
-st.session_state.player_id = player_id
-
-period_options = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"]
-st.session_state.student_period = st.sidebar.selectbox(
-    "Class / Period",
-    period_options,
-    index=period_options.index(st.session_state.student_period)
-    if st.session_state.student_period in period_options
-    else 0,
-    key="sidebar_student_period_select"
-)
-
-if not st.session_state.player_id:
-    st.warning("Enter First Name + numeric Student ID to start.")
+if not st.session_state.player_id and not is_teacher_user:
+    st.warning("No valid player identity found.")
     st.stop()
 
+# =================================================
+# SYNC PLAYER ONLY WHEN IDENTITY CHANGES
+# =================================================
 if (
     st.session_state.player_id
     and (
@@ -1532,6 +1703,137 @@ st.divider()
 if st.session_state.is_teacher:
     st.markdown("## 🔒 Teacher View")
 
+    # -----------------------------
+    # Student Manager
+    # -----------------------------
+    st.markdown("### 👩‍🏫 Student Manager")
+
+    with st.form("create_student_form"):
+        sm1, sm2 = st.columns(2)
+
+        with sm1:
+            new_student_email = st.text_input("Student Email")
+            new_student_password = st.text_input("Temporary Password", type="password")
+            new_first_name = st.text_input("First Name")
+
+        with sm2:
+            new_student_id = st.text_input("Student ID")
+            new_period = st.selectbox(
+                "Period",
+                ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"],
+                key="teacher_student_period_create_select"
+            )
+            new_active = st.checkbox("Active", value=True)
+
+        create_student_submit = st.form_submit_button("Create Student")
+
+    if create_student_submit:
+        try:
+            created = create_student_account_and_profile(
+                email=new_student_email,
+                password=new_student_password,
+                first_name=new_first_name,
+                student_id=new_student_id,
+                period=new_period,
+                active=new_active,
+            )
+            st.success(f"Student created successfully: {created['display_name']} | UID: {created['uid']}")
+        except Exception as e:
+            st.error(str(e))
+
+    try:
+        student_profiles = load_student_profiles()
+    except Exception as e:
+        student_profiles = []
+        st.warning("Could not load student profiles.")
+        st.code(str(e))
+
+    if student_profiles:
+        st.markdown("#### Existing Students")
+
+        student_rows = []
+        for s in sorted(student_profiles, key=lambda x: (str(x.get("period", "")), str(x.get("first_name", "")))):
+            student_rows.append({
+                "UID": s.get("uid", ""),
+                "Email": s.get("email", ""),
+                "First Name": s.get("first_name", ""),
+                "Student ID": s.get("student_id", ""),
+                "Period": s.get("period", ""),
+                "Active": bool(s.get("active", True)),
+            })
+
+        st.dataframe(student_rows, use_container_width=True, height=280)
+
+        student_lookup = {
+            f"{s.get('first_name', '')} | {s.get('student_id', '')} | {s.get('email', '')}": s
+            for s in student_profiles
+        }
+
+        selected_student_label = st.selectbox(
+            "Select Student to Edit",
+            [""] + list(student_lookup.keys()),
+            key="teacher_select_student_to_edit"
+        )
+
+        if selected_student_label:
+            selected_student = student_lookup[selected_student_label]
+
+            with st.form("edit_student_form"):
+                es1, es2 = st.columns(2)
+
+                with es1:
+                    edit_first_name = st.text_input("Edit First Name", value=selected_student.get("first_name", ""))
+                    edit_student_id = st.text_input("Edit Student ID", value=str(selected_student.get("student_id", "")))
+
+                with es2:
+                    edit_period_options = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"]
+                    edit_period = st.selectbox(
+                        "Edit Period",
+                        edit_period_options,
+                        index=edit_period_options.index(selected_student.get("period", "Other"))
+                        if selected_student.get("period", "Other") in edit_period_options
+                        else 0,
+                        key="teacher_student_period_edit_select"
+                    )
+                    edit_active = st.checkbox("Edit Active", value=bool(selected_student.get("active", True)))
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    update_student_submit = st.form_submit_button("Update Student")
+                with c2:
+                    deactivate_label = "Deactivate Student" if bool(selected_student.get("active", True)) else "Activate Student"
+                    toggle_active_submit = st.form_submit_button(deactivate_label)
+
+            if update_student_submit:
+                try:
+                    update_student_profile(
+                        uid=selected_student.get("uid", ""),
+                        first_name=edit_first_name,
+                        student_id=edit_student_id,
+                        period=edit_period,
+                        active=edit_active,
+                    )
+                    st.success("Student updated successfully.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+            if toggle_active_submit:
+                try:
+                    set_student_profile_active(
+                        uid=selected_student.get("uid", ""),
+                        active=not bool(selected_student.get("active", True))
+                    )
+                    st.success("Student active status updated.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+    st.divider()
+
+    # -----------------------------
+    # Question / leaderboard tools
+    # -----------------------------
     status_box = st.empty()
     progress_box = st.empty()
     result_box = st.empty()
