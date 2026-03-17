@@ -9,7 +9,7 @@ from datetime import datetime
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-from streamlit_cookies_manager import EncryptedCookieManager
+from st_cookies_manager import EncryptedCookieManager
 from google import genai
 import firebase_admin
 from firebase_admin import credentials, firestore, auth as firebase_auth
