@@ -1363,59 +1363,30 @@ st.sidebar.success("✅ Persistent mode: Firebase Firestore")
 # AUTO REFRESH
 # =================================================
 if st.session_state.get("is_teacher", False):
-    live_refresh = st.sidebar.checkbox(
-        "Live leaderboard refresh",
-        value=False,
-        key="teacher_live_refresh_checkbox"
-    )
-    refresh_seconds = st.sidebar.selectbox(
-        "Refresh speed",
-        [30, 60, 120],
-        index=0,
-        key="teacher_refresh_speed_select"
-    )
-
     if (
-        live_refresh
-        and not st.session_state.get("is_generating", False)
+        not st.session_state.get("is_generating", False)
         and not st.session_state.get("challenge_mode", False)
     ):
         st_autorefresh(
-            interval=refresh_seconds * 1000,
+            interval=60 * 1000,
             limit=None,
             key="teacher_live_refresh_timer"
         )
-        st.sidebar.caption(f"🔄 Teacher refresh every {refresh_seconds} seconds")
+        st.sidebar.caption("🔄 Teacher refresh every 60 seconds")
     else:
         if st.session_state.get("is_generating", False):
-            st.sidebar.caption("⏸ Auto-refresh paused during question generation")
+            st.sidebar.caption("⏸ Teacher refresh paused during question generation")
         elif st.session_state.get("challenge_mode", False):
-            st.sidebar.caption("⏸ Auto-refresh paused during active challenge")
-        else:
-            st.sidebar.caption("Teacher auto-refresh is off")
+            st.sidebar.caption("⏸ Teacher refresh paused during active challenge")
 
 else:
-    student_live_refresh = st.sidebar.checkbox(
-        "Auto-refresh challenges",
-        value=True,
-        key="student_live_refresh_checkbox"
-    )
-    student_refresh_seconds = st.sidebar.selectbox(
-        "Challenge refresh speed",
-        [15, 30, 60],
-        index=1,
-        key="student_refresh_speed_select"
-    )
-
-    if student_live_refresh and not st.session_state.get("challenge_mode", False):
+    if not st.session_state.get("challenge_mode", False):
         st_autorefresh(
-            interval=student_refresh_seconds * 1000,
+            interval=30 * 1000,
             limit=None,
             key="student_challenge_refresh_timer"
         )
-        st.sidebar.caption(
-            f"🔄 Challenges refresh every {student_refresh_seconds} seconds"
-        )
+        st.sidebar.caption("🔄 Challenges refresh every 30 seconds")
     else:
         st.sidebar.caption("⏸ Auto-refresh paused during active challenge")
 
