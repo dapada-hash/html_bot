@@ -463,6 +463,9 @@ def sign_out():
     st.session_state.challenge_cache = []
     st.session_state.last_db_sync = 0
 
+    st.session_state.challenge_result_popup_text = ""
+    st.session_state.challenge_result_popup_kind = ""
+
     if cookies is not None:
         cookies["firebase_session"] = ""
         cookies.save()
@@ -1078,6 +1081,9 @@ def show_challenge_result_popup():
         """,
         unsafe_allow_html=True,
     )
+
+    st.session_state.challenge_result_popup_text = ""
+    st.session_state.challenge_result_popup_kind = ""
 
 
 # =================================================
