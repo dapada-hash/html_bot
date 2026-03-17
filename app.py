@@ -253,6 +253,47 @@ def player_has_active_challenge(player_id_value: str, challenges: list) -> bool:
     return False
 
 
+def check_and_show_finished_challenge_result(challenges: list, player_id_lower_: str):
+    for c in sorted(challenges, key=challenge_sort_key, reverse=True):
+        if c.get("status") != "done":
+            continue
+
+        cid = str(c.get("challenge_id", "")).strip()
+        if not cid:
+            continue
+
+        if cid in st.session_state.shown_result_challenge_ids:
+            continue
+
+        challenger = str(c.get("challenger", "")).strip().lower()
+        opponent = str(c.get("opponent", "")).strip().lower()
+
+        if player_id_lower_ not in (challenger, opponent):
+            continue
+
+        cs = safe_int(c.get("challenger_score", 0))
+        os_ = safe_int(c.get("opponent_score", 0))
+
+        if cs == os_:
+            st.session_state.challenge_result_popup_text = "TIE GAME"
+            st.session_state.challenge_result_popup_kind = "tie"
+        else:
+            i_am_challenger = (player_id_lower_ == challenger)
+            i_won = (cs > os_) if i_am_challenger else (os_ > cs)
+
+            if i_won:
+                st.session_state.challenge_result_popup_text = "YOU WON!"
+                st.session_state.challenge_result_popup_kind = "win"
+            else:
+                st.session_state.challenge_result_popup_text = "YOU LOST"
+                st.session_state.challenge_result_popup_kind = "loss"
+
+        st.session_state.challenge_result_popup_nonce += 1
+        st.session_state.shown_result_challenge_ids.append(cid)
+        st.session_state.shown_result_challenge_ids = st.session_state.shown_result_challenge_ids[-100:]
+        break
+
+
 # =================================================
 # FIREBASE / FIRESTORE
 # =================================================
@@ -1190,6 +1231,9 @@ st.session_state.setdefault("auth_user", None)
 st.session_state.setdefault("auth_id_token", "")
 st.session_state.setdefault("auth_refresh_token", "")
 
+st.session_state.setdefault("shown_result_challenge_ids", [])
+st.session_state.setdefault("latest_result_checked_at", 0)
+
 # =================================================
 # RESTORE AUTH FROM COOKIE FIRST
 # =================================================
@@ -1411,6 +1455,8 @@ me = next(
     {}
 )
 my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
+
+check_and_show_finished_challenge_result(ch_all, player_id_lower)
 
 show_xp_popup()
 show_challenge_result_popup()
