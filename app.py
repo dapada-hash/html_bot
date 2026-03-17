@@ -97,6 +97,7 @@ STREAK_BONUS_XP = 20
 
 COOLDOWN_SECONDS = 1
 MAX_CHALLENGE_HISTORY_PER_COLUMN = 2
+RESULT_POPUP_WINDOW_SECONDS = 45
 
 # =================================================
 # COOKIES
@@ -183,6 +184,15 @@ def safe_int(v, default=0):
         return default
 
 
+def parse_iso_utc_to_ts(iso_str: str) -> float:
+    try:
+        if not iso_str:
+            return 0.0
+        return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
 def parse_service_account(raw_value):
     if not raw_value:
         return None
@@ -254,6 +264,8 @@ def player_has_active_challenge(player_id_value: str, challenges: list) -> bool:
 
 
 def check_and_show_finished_challenge_result(challenges: list, player_id_lower_: str):
+    now_ts = time.time()
+
     for c in sorted(challenges, key=challenge_sort_key, reverse=True):
         if c.get("status") != "done":
             continue
@@ -269,6 +281,13 @@ def check_and_show_finished_challenge_result(challenges: list, player_id_lower_:
         opponent = str(c.get("opponent", "")).strip().lower()
 
         if player_id_lower_ not in (challenger, opponent):
+            continue
+
+        completed_ts = parse_iso_utc_to_ts(str(c.get("completed_utc", "")).strip())
+        if completed_ts <= 0:
+            continue
+
+        if now_ts - completed_ts > RESULT_POPUP_WINDOW_SECONDS:
             continue
 
         cs = safe_int(c.get("challenger_score", 0))
@@ -789,6 +808,7 @@ def create_challenge(challenger: str, opponent: str, domain: str, difficulty: st
     ref.set({
         "challenge_id": ref.id,
         "created_utc": now_utc(),
+        "completed_utc": None,
         "challenger": challenger,
         "opponent": opponent,
         "domain": domain,
@@ -2244,7 +2264,10 @@ if st.button(
                             and refreshed.get("opponent_score") is not None
                         ):
                             if refreshed.get("status") != "done":
-                                update_challenge(cid, {"status": "done"})
+                                update_challenge(cid, {
+                                    "status": "done",
+                                    "completed_utc": now_utc()
+                                })
 
                             final_snap = challenge_ref(cid).get()
                             final_row = final_snap.to_dict() if final_snap.exists else None
