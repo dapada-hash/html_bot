@@ -702,6 +702,18 @@ def set_student_profile_active(uid: str, active: bool):
     mark_db_data_stale()
 
 
+def delete_student_profile_and_auth(uid: str):
+    uid = str(uid).strip()
+    if not uid:
+        raise ValueError("UID is required.")
+
+    db().collection("student_profiles").document(uid).delete()
+    firebase_auth.delete_user(uid)
+
+    clear_db_caches()
+    mark_db_data_stale()
+
+
 # =================================================
 # FIRESTORE WRITE HELPERS
 # =================================================
@@ -2001,12 +2013,14 @@ if st.session_state.is_teacher:
                     )
                     edit_active = st.checkbox("Edit Active", value=bool(selected_student.get("active", True)))
 
-                c1, c2 = st.columns(2)
+                c1, c2, c3 = st.columns(3)
                 with c1:
                     update_student_submit = st.form_submit_button("Update Student")
                 with c2:
                     deactivate_label = "Deactivate Student" if bool(selected_student.get("active", True)) else "Activate Student"
                     toggle_active_submit = st.form_submit_button(deactivate_label)
+                with c3:
+                    delete_student_submit = st.form_submit_button("Delete Student")
 
             if update_student_submit:
                 try:
@@ -2029,6 +2043,14 @@ if st.session_state.is_teacher:
                         active=not bool(selected_student.get("active", True))
                     )
                     st.success("Student active status updated.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+            if delete_student_submit:
+                try:
+                    delete_student_profile_and_auth(selected_student.get("uid", ""))
+                    st.success("Student deleted successfully.")
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
