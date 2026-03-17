@@ -308,7 +308,6 @@ def firebase_sign_in_email_password(email: str, password: str):
     if not FIREBASE_WEB_API_KEY.strip():
         raise ValueError("Missing FIREBASE_WEB_API_KEY in secrets.")
 
-    # Make sure Admin SDK is initialized before using firebase_auth functions
     get_firestore_client()
 
     url = (
@@ -1376,15 +1375,29 @@ if st.session_state.get("is_teacher", False):
         key="teacher_refresh_speed_select"
     )
 
-    if live_refresh and not st.session_state.get("is_generating", False):
-        st_autorefresh(interval=refresh_seconds * 1000, limit=None, key="teacher_live_refresh_timer")
+    if (
+        live_refresh
+        and not st.session_state.get("is_generating", False)
+        and not st.session_state.get("challenge_mode", False)
+    ):
+        st_autorefresh(
+            interval=refresh_seconds * 1000,
+            limit=None,
+            key="teacher_live_refresh_timer"
+        )
         st.sidebar.caption(f"🔄 Teacher refresh every {refresh_seconds} seconds")
-    elif st.session_state.get("is_generating", False):
-        st.sidebar.caption("⏸ Auto-refresh paused during question generation")
+    else:
+        if st.session_state.get("is_generating", False):
+            st.sidebar.caption("⏸ Auto-refresh paused during question generation")
+        elif st.session_state.get("challenge_mode", False):
+            st.sidebar.caption("⏸ Auto-refresh paused during active challenge")
+        else:
+            st.sidebar.caption("Teacher auto-refresh is off")
+
 else:
     student_live_refresh = st.sidebar.checkbox(
         "Auto-refresh challenges",
-        value=False,
+        value=True,
         key="student_live_refresh_checkbox"
     )
     student_refresh_seconds = st.sidebar.selectbox(
@@ -1395,10 +1408,19 @@ else:
     )
 
     if student_live_refresh and not st.session_state.get("challenge_mode", False):
-        st_autorefresh(interval=student_refresh_seconds * 1000, limit=None, key="student_challenge_refresh_timer")
-        st.sidebar.caption(f"🔄 Student refresh every {student_refresh_seconds} seconds")
+        st_autorefresh(
+            interval=student_refresh_seconds * 1000,
+            limit=None,
+            key="student_challenge_refresh_timer"
+        )
+        st.sidebar.caption(
+            f"🔄 Challenges refresh every {student_refresh_seconds} seconds"
+        )
     else:
-        st.sidebar.caption("Student auto-refresh paused during active challenge")
+        st.sidebar.caption("⏸ Auto-refresh paused during active challenge")
+
+    if st.sidebar.button("🔄 Check for new challenges", key="manual_student_refresh_btn"):
+        st.rerun()
 
 # =================================================
 # SINGLE DATA FETCH
@@ -1683,6 +1705,7 @@ def start_challenge_attempt(challenge_row: dict):
 # CHALLENGE INBOX / OUTBOX
 # =================================================
 st.markdown("## 📩 Challenges")
+st.caption("New incoming challenges appear automatically about every 30 seconds while you are not inside an active challenge.")
 
 incoming = [
     c for c in ch_all
