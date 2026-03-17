@@ -9,6 +9,7 @@ from datetime import datetime
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+from st_cookies_manager import EncryptedCookieManager
 from google import genai
 import firebase_admin
 from firebase_admin import credentials, firestore, auth as firebase_auth
@@ -63,6 +64,12 @@ TEACHER_EMAILS_RAW = (
     or ""
 )
 
+COOKIE_PASSWORD = (
+    read_secret("COOKIE_PASSWORD")
+    or read_env("COOKIE_PASSWORD")
+    or "change-this-cookie-password"
+)
+
 MODEL = "gemini-2.5-flash"
 
 BATCH_SIZE = 25
@@ -83,6 +90,17 @@ STREAK_BONUS_XP = 20
 
 COOLDOWN_SECONDS = 1
 MAX_CHALLENGE_HISTORY_PER_COLUMN = 2
+
+# =================================================
+# COOKIES
+# =================================================
+cookies = EncryptedCookieManager(
+    prefix="html_arena_",
+    password=COOKIE_PASSWORD,
+)
+
+if not cookies.ready():
+    st.stop()
 
 # =================================================
 # DOMAINS
@@ -309,8 +327,50 @@ def firebase_sign_in_email_password(email: str, password: str):
 
 
 def verify_firebase_id_token(id_token: str):
-    decoded = firebase_auth.verify_id_token(id_token)
-    return decoded
+    return firebase_auth.verify_id_token(id_token)
+
+
+def create_firebase_session_cookie(id_token: str, expires_days: int = 5):
+    expires_in_seconds = expires_days * 24 * 60 * 60
+    return firebase_auth.create_session_cookie(
+        id_token,
+        expires_in=expires_in_seconds
+    )
+
+
+def verify_firebase_session_cookie(session_cookie: str):
+    return firebase_auth.verify_session_cookie(session_cookie, check_revoked=True)
+
+
+def restore_auth_from_cookie():
+    session_cookie = cookies.get("firebase_session", "")
+    if not session_cookie:
+        return False
+
+    try:
+        decoded = verify_firebase_session_cookie(session_cookie)
+        email = str(decoded.get("email", "")).strip().lower()
+        teacher_emails = get_teacher_emails()
+
+        st.session_state.auth_verified = True
+        st.session_state.auth_user = {
+            "uid": decoded.get("uid", ""),
+            "email": email,
+            "email_verified": bool(decoded.get("email_verified", False)),
+            "is_teacher": email in teacher_emails,
+        }
+        st.session_state.is_teacher = email in teacher_emails
+        return True
+    except Exception:
+        cookies["firebase_session"] = ""
+        cookies.save()
+        return False
+
+
+def persist_auth_cookie(id_token: str):
+    session_cookie = create_firebase_session_cookie(id_token, expires_days=5)
+    cookies["firebase_session"] = session_cookie
+    cookies.save()
 
 
 def sign_out():
@@ -338,6 +398,9 @@ def sign_out():
     st.session_state.leaderboard_cache = []
     st.session_state.challenge_cache = []
     st.session_state.last_db_sync = 0
+
+    cookies["firebase_session"] = ""
+    cookies.save()
 
 
 # =================================================
@@ -1102,6 +1165,12 @@ st.session_state.setdefault("auth_id_token", "")
 st.session_state.setdefault("auth_refresh_token", "")
 
 # =================================================
+# RESTORE AUTH FROM COOKIE FIRST
+# =================================================
+if not st.session_state.auth_verified:
+    restore_auth_from_cookie()
+
+# =================================================
 # AUTH GATE - BEFORE ANY FIRESTORE READ / WRITE
 # =================================================
 with st.sidebar:
@@ -1134,6 +1203,8 @@ with st.sidebar:
                     "is_teacher": email in teacher_emails,
                 }
                 st.session_state.is_teacher = email in teacher_emails
+
+                persist_auth_cookie(sign_in_result["id_token"])
 
                 st.success("Signed in successfully.")
                 st.rerun()
@@ -1703,9 +1774,6 @@ st.divider()
 if st.session_state.is_teacher:
     st.markdown("## 🔒 Teacher View")
 
-    # -----------------------------
-    # Student Manager
-    # -----------------------------
     st.markdown("### 👩‍🏫 Student Manager")
 
     with st.form("create_student_form"):
@@ -1831,9 +1899,6 @@ if st.session_state.is_teacher:
 
     st.divider()
 
-    # -----------------------------
-    # Question / leaderboard tools
-    # -----------------------------
     status_box = st.empty()
     progress_box = st.empty()
     result_box = st.empty()
