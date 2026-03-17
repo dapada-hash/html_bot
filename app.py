@@ -151,22 +151,22 @@ FALLBACK_QUESTIONS = [
         "explanation": "`<link rel=\"stylesheet\" href=\"...\">` connects external CSS."
     },
     {
-        "question": "Which selector targets an element with `id=\"main\"`?",
-        "A": "`.main`",
-        "B": "`#main`",
-        "C": "`main`",
-        "D": "`*main`",
-        "correct": "B",
-        "explanation": "`#main` selects an element by id."
+        "question": "The `<header>` element is a semantic HTML tag.",
+        "A": "True",
+        "B": "False",
+        "C": "Not used",
+        "D": "Not used",
+        "correct": "A",
+        "explanation": "`<header>` is a semantic element that describes introductory content."
     },
     {
-        "question": "Which is the correct DOCTYPE for HTML5?",
-        "A": "`<!DOCTYPE html>`",
-        "B": "`<DOCTYPE html5>`",
-        "C": "`<!HTML5>`",
-        "D": "`<!DOCTYPE HTML PUBLIC>`",
+        "question": "Put these steps in the best order to connect an external stylesheet to an HTML page.",
+        "A": "Create CSS file → open HTML `<head>` → add `<link rel=\"stylesheet\" href=\"style.css\">` → save and refresh browser",
+        "B": "Refresh browser → create CSS file → add `<link>` → open `<head>`",
+        "C": "Add `<script>` tag → create CSS file → refresh browser → open `<head>`",
+        "D": "Open `<body>` → add inline style → create CSS file → refresh browser",
         "correct": "A",
-        "explanation": "HTML5 uses `<!DOCTYPE html>`."
+        "explanation": "The CSS file is created first, then linked in the HTML `<head>`, then tested in the browser."
     },
 ]
 
@@ -484,6 +484,7 @@ def sign_out():
 
     st.session_state.challenge_result_popup_text = ""
     st.session_state.challenge_result_popup_kind = ""
+    st.session_state.create_student_form_cleared = False
 
     if cookies is not None:
         cookies["firebase_session"] = ""
@@ -898,18 +899,53 @@ def parse_batch(raw: str):
 def fetch_questions_from_gemini(topic: str, difficulty: str, count: int):
     prompt = f"""
 You are a Certiport HTML/CSS certification exam writer.
-Create exactly {count} multiple choice questions.
+Create exactly {count} questions for a classroom quiz game.
 
 DOMAIN: {topic}
 DIFFICULTY: {difficulty}
 
-Requirements:
-- Focus strictly on this domain.
-- Focus on Certiport-style HTML/CSS exam prep.
-- Use realistic distractors.
+IMPORTANT:
+- Mix the question styles across the batch.
+- Use these 3 styles:
+  1. Standard multiple choice
+  2. True/False
+  3. Ordering-as-multiple-choice
+
+QUESTION STYLE RULES:
+- At least some questions should be standard MCQ.
+- At least some questions should be True/False.
+- At least some questions should be ordering questions written as MCQ choices.
+- Do NOT use drag-and-drop.
+- Do NOT require free response.
+- Every question must still fit this exact answer model:
+  A, B, C, or D
+
+CONTENT RULES:
+- Focus strictly on this HTML/CSS domain.
+- Use Certiport-style HTML/CSS questions.
 - Include short HTML/CSS snippets when helpful.
-- Return only multiple-choice questions.
+- Ask about syntax, structure, styling, selectors, accessibility, responsive design, semantics, links, forms, media, and troubleshooting.
+- Use realistic distractors.
 - Use backticks around code when useful.
+
+TRUE/FALSE RULES:
+- For True/False questions, still format the answers as:
+  A) True
+  B) False
+  C) Not used
+  D) Not used
+- Correct answer must be A or B only.
+
+ORDERING RULES:
+- For ordering questions, ask students to choose the correct sequence.
+- Example style:
+  QUESTION: Put the following steps in the correct order...
+  A) 1, 2, 3, 4
+  B) 1, 3, 2, 4
+  C) 2, 1, 3, 4
+  D) 3, 1, 2, 4
+- Do NOT ask students to manually rearrange items.
+- Ordering questions must still be answerable with A/B/C/D.
 
 FORMAT (MUST MATCH EXACTLY):
 - Each question separated by a line containing ONLY: ###
@@ -1259,6 +1295,7 @@ st.session_state.setdefault("auth_refresh_token", "")
 
 st.session_state.setdefault("shown_result_challenge_ids", [])
 st.session_state.setdefault("latest_result_checked_at", 0)
+st.session_state.setdefault("create_student_form_cleared", False)
 
 # =================================================
 # RESTORE AUTH FROM COOKIE FIRST
@@ -1872,7 +1909,10 @@ if st.session_state.is_teacher:
 
     st.markdown("### 👩‍🏫 Student Manager")
 
-    with st.form("create_student_form"):
+    if st.session_state.pop("create_student_form_cleared", False):
+        st.success("Student created successfully.")
+
+    with st.form("create_student_form", clear_on_submit=True):
         sm1, sm2 = st.columns(2)
 
         with sm1:
@@ -1884,8 +1924,7 @@ if st.session_state.is_teacher:
             new_student_id = st.text_input("Student ID")
             new_period = st.selectbox(
                 "Period",
-                ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"],
-                key="teacher_student_period_create_select"
+                ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"]
             )
             new_active = st.checkbox("Active", value=True)
 
@@ -1893,7 +1932,7 @@ if st.session_state.is_teacher:
 
     if create_student_submit:
         try:
-            created = create_student_account_and_profile(
+            create_student_account_and_profile(
                 email=new_student_email,
                 password=new_student_password,
                 first_name=new_first_name,
@@ -1901,7 +1940,8 @@ if st.session_state.is_teacher:
                 period=new_period,
                 active=new_active,
             )
-            st.success(f"Student created successfully: {created['display_name']} | UID: {created['uid']}")
+            st.session_state["create_student_form_cleared"] = True
+            st.rerun()
         except Exception as e:
             st.error(str(e))
 
