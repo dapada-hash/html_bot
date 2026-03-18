@@ -1200,6 +1200,13 @@ def show_xp_popup():
     if not popup_text:
         return
 
+    if popup_nonce != st.session_state.get("last_seen_xp_toast_nonce", -1):
+        try:
+            st.toast(popup_text.replace("\n", " • "))
+        except Exception:
+            pass
+        st.session_state.last_seen_xp_toast_nonce = popup_nonce
+
     bg = "linear-gradient(180deg, #22c55e, #16a34a)" if popup_kind == "good" else "linear-gradient(180deg, #f59e0b, #d97706)"
     border = "#166534" if popup_kind == "good" else "#92400e"
 
@@ -1502,6 +1509,7 @@ st.session_state.setdefault("session_logged", False)
 st.session_state.setdefault("xp_popup_text", "")
 st.session_state.setdefault("xp_popup_kind", "")
 st.session_state.setdefault("xp_popup_nonce", 0)
+st.session_state.setdefault("last_seen_xp_toast_nonce", -1)
 
 st.session_state.setdefault("challenge_result_popup_text", "")
 st.session_state.setdefault("challenge_result_popup_kind", "")
@@ -2634,22 +2642,27 @@ if st.button(
             streak_before = safe_int(me.get("streak", 0))
             streak_after = streak_before + 1
             bonus = STREAK_BONUS_XP if streak_after % STREAK_BONUS_EVERY == 0 else 0
+            total_xp_gain = XP_CORRECT + bonus
 
             st.session_state.score += 1
 
             try:
-                add_xp_and_streak(st.session_state.player_id, XP_CORRECT + bonus, +1)
+                add_xp_and_streak(st.session_state.player_id, total_xp_gain, +1)
                 mark_db_data_stale()
             except Exception as e:
                 st.warning("Could not save score to Firebase.")
                 st.code(str(e))
 
             if bonus:
-                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP\n🔥 Streak Bonus +{bonus}"
-                st.session_state.last_feedback_text = f"✅ Correct! +{XP_CORRECT} XP • 🔥 Streak bonus +{bonus} XP\n\n{q['explanation']}"
+                st.session_state.xp_popup_text = f"+{total_xp_gain} XP\n({XP_CORRECT} base + {bonus} streak bonus)"
+                st.session_state.last_feedback_text = (
+                    f"✅ Correct! +{total_xp_gain} XP\n"
+                    f"Base: +{XP_CORRECT} XP • 🔥 Streak Bonus: +{bonus} XP\n\n"
+                    f"{q['explanation']}"
+                )
             else:
-                st.session_state.xp_popup_text = f"+{XP_CORRECT} XP"
-                st.session_state.last_feedback_text = f"✅ Correct! +{XP_CORRECT} XP\n\n{q['explanation']}"
+                st.session_state.xp_popup_text = f"+{total_xp_gain} XP"
+                st.session_state.last_feedback_text = f"✅ Correct! +{total_xp_gain} XP\n\n{q['explanation']}"
 
             st.session_state.xp_popup_kind = "good"
             st.session_state.xp_popup_nonce += 1
@@ -2680,9 +2693,6 @@ if st.button(
             st.warning("Could not save session log to Firebase.")
             st.code(str(e))
 
-        # -----------------------------
-        # 1v1 CHALLENGE MODE
-        # -----------------------------
         if st.session_state.challenge_mode and st.session_state.challenge_id:
             cid = st.session_state.challenge_id
             st.session_state.challenge_count += 1
@@ -2778,9 +2788,6 @@ if st.button(
                 load_next_question_for_current_mode()
                 st.rerun()
 
-        # -----------------------------
-        # ARENA EVENT MODE
-        # -----------------------------
         elif st.session_state.event_mode and st.session_state.event_id:
             st.session_state.event_count += 1
             if correct:
@@ -2819,9 +2826,6 @@ if st.button(
                 load_next_question_for_current_mode()
                 st.rerun()
 
-        # -----------------------------
-        # NORMAL MODE
-        # -----------------------------
         else:
             st.session_state.processing_submission = False
             st.session_state.pending_auto_next = True
