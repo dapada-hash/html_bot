@@ -1623,6 +1623,7 @@ st.session_state.setdefault("create_student_form_cleared", False)
 
 st.session_state.setdefault("last_feedback_text", "")
 st.session_state.setdefault("last_feedback_kind", "info")
+st.session_state.setdefault("teacher_event_page", 1)
 
 # =================================================
 # RESTORE AUTH FROM COOKIE FIRST
@@ -2494,7 +2495,39 @@ if st.session_state.is_teacher:
 
     if all_events:
         st.markdown("#### Event Manager")
-        for ev in all_events[:8]:
+
+        EVENTS_PER_PAGE = 3
+        total_events = len(all_events)
+        total_pages = max(1, (total_events + EVENTS_PER_PAGE - 1) // EVENTS_PER_PAGE)
+
+        if st.session_state.teacher_event_page > total_pages:
+            st.session_state.teacher_event_page = total_pages
+        if st.session_state.teacher_event_page < 1:
+            st.session_state.teacher_event_page = 1
+
+        nav1, nav2, nav3 = st.columns([1, 2, 1])
+
+        with nav1:
+            if st.button("◀ Previous", disabled=st.session_state.teacher_event_page <= 1, key="teacher_event_prev_btn"):
+                st.session_state.teacher_event_page -= 1
+                st.rerun()
+
+        with nav2:
+            st.markdown(
+                f"<div style='text-align:center; font-weight:700; padding-top:8px;'>Page {st.session_state.teacher_event_page} of {total_pages}</div>",
+                unsafe_allow_html=True
+            )
+
+        with nav3:
+            if st.button("Next ▶", disabled=st.session_state.teacher_event_page >= total_pages, key="teacher_event_next_btn"):
+                st.session_state.teacher_event_page += 1
+                st.rerun()
+
+        start_idx = (st.session_state.teacher_event_page - 1) * EVENTS_PER_PAGE
+        end_idx = start_idx + EVENTS_PER_PAGE
+        paged_events = all_events[start_idx:end_idx]
+
+        for ev in paged_events:
             ev_status = str(ev.get("status", "")).strip().lower()
             title_text = ev.get("title", "Arena Event")
             st.markdown(
@@ -2511,6 +2544,7 @@ if st.session_state.is_teacher:
                     "Participants": safe_int(score_data.get("count", 0)),
                     "Average": safe_float(score_data.get("average", 0.0)),
                 })
+
             if score_rows:
                 st.dataframe(score_rows, use_container_width=True, height=170)
 
@@ -2532,6 +2566,8 @@ if st.session_state.is_teacher:
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
+
+            st.markdown("---")
 
     st.divider()
 
