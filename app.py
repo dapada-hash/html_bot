@@ -263,6 +263,13 @@ def player_has_active_challenge(player_id_value: str, challenges: list) -> bool:
     return False
 
 
+def challenge_is_locked_for_ui(challenge_id: str) -> bool:
+    return (
+        st.session_state.get("challenge_mode", False)
+        and str(st.session_state.get("challenge_id", "")).strip() == str(challenge_id).strip()
+    )
+
+
 def check_and_show_finished_challenge_result(challenges: list, player_id_lower_: str):
     now_ts = time.time()
 
@@ -1251,20 +1258,20 @@ def render_combo_meter(streak_value: int):
 
 
 def show_last_feedback():
-    text = st.session_state.get("last_feedback_text", "").strip()
-    kind = st.session_state.get("last_feedback_kind", "info")
+    popup_text = st.session_state.get("last_feedback_text", "").strip()
+    popup_kind = st.session_state.get("last_feedback_kind", "info")
 
-    if not text:
+    if not popup_text:
         return
 
-    if kind == "success":
-        st.success(text)
-    elif kind == "error":
-        st.error(text)
-    elif kind == "warning":
-        st.warning(text)
+    if popup_kind == "success":
+        st.success(popup_text)
+    elif popup_kind == "error":
+        st.error(popup_text)
+    elif popup_kind == "warning":
+        st.warning(popup_text)
     else:
-        st.info(text)
+        st.info(popup_text)
 
 
 # =================================================
@@ -1693,11 +1700,14 @@ for i, r in enumerate(lb_sorted[:10], start=1):
             or opp_lower == player_id_lower
             or my_has_active_challenge
             or player_has_active_challenge(opp_name, ch_all)
+            or st.session_state.get("challenge_mode", False)
         )
 
         button_label = "⚔️ Challenge"
         if opp_name and player_has_active_challenge(opp_name, ch_all):
             button_label = "Busy"
+        if st.session_state.get("challenge_mode", False):
+            button_label = "🔒 In Progress"
 
         if st.button(button_label, key=f"challenge_{opp_name}_{i}", disabled=disabled_send):
             if time.time() - st.session_state.last_challenge_sent_at < 5:
@@ -1803,12 +1813,16 @@ def load_next_question_for_current_mode():
 
 def start_challenge_attempt(challenge_row: dict):
     status = str(challenge_row.get("status", "")).strip().lower()
+    cid = str(challenge_row.get("challenge_id", "")).strip()
 
     if status != "accepted":
         raise ValueError("This challenge cannot start until the opponent accepts it.")
 
+    if st.session_state.get("challenge_mode", False):
+        raise ValueError("A challenge is already in progress.")
+
     st.session_state.challenge_mode = True
-    st.session_state.challenge_id = challenge_row["challenge_id"]
+    st.session_state.challenge_id = cid
     st.session_state.challenge_count = 0
     st.session_state.challenge_correct = 0
     st.session_state.active_domain = challenge_row["domain"]
@@ -1848,24 +1862,14 @@ with left:
             already_completed = my_challenge_already_completed(c, player_id_lower)
             challenge_done = c.get("status") == "done"
             status = str(c.get("status", "")).strip().lower()
+            challenge_locked = challenge_is_locked_for_ui(c["challenge_id"])
+            any_challenge_running = st.session_state.get("challenge_mode", False)
 
             st.write(
                 f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
             )
 
-            if status == "pending":
-                if st.button(f"Accept {c['challenge_id']}", key=f"accept_{c['challenge_id']}"):
-                    try:
-                        update_challenge(c["challenge_id"], {"status": "accepted"})
-                        c["status"] = "accepted"
-                        start_challenge_attempt(c)
-                        st.success("Challenge accepted!")
-                        st.rerun()
-                    except Exception as e:
-                        st.warning("Could not accept challenge.")
-                        st.code(str(e))
-
-            elif challenge_done:
+            if challenge_done:
                 st.button(
                     "✅ Challenge Over",
                     key=f"incoming_done_{c['challenge_id']}",
@@ -1879,8 +1883,42 @@ with left:
                     disabled=True
                 )
 
+            elif challenge_locked:
+                st.button(
+                    "🔒 In Progress",
+                    key=f"incoming_locked_{c['challenge_id']}",
+                    disabled=True
+                )
+
+            elif any_challenge_running:
+                st.button(
+                    "🔒 In Progress",
+                    key=f"incoming_busy_{c['challenge_id']}",
+                    disabled=True
+                )
+
+            elif status == "pending":
+                if st.button(
+                    f"Accept {c['challenge_id']}",
+                    key=f"accept_{c['challenge_id']}",
+                    disabled=any_challenge_running
+                ):
+                    try:
+                        update_challenge(c["challenge_id"], {"status": "accepted"})
+                        c["status"] = "accepted"
+                        start_challenge_attempt(c)
+                        st.success("Challenge accepted!")
+                        st.rerun()
+                    except Exception as e:
+                        st.warning("Could not accept challenge.")
+                        st.code(str(e))
+
             elif status == "accepted":
-                if st.button(f"Start {c['challenge_id']}", key=f"incoming_start_{c['challenge_id']}"):
+                if st.button(
+                    f"Start {c['challenge_id']}",
+                    key=f"incoming_start_{c['challenge_id']}",
+                    disabled=any_challenge_running
+                ):
                     try:
                         start_challenge_attempt(c)
                         st.success("Challenge attempt started!")
@@ -1898,6 +1936,8 @@ with right:
             already_completed = my_challenge_already_completed(c, player_id_lower)
             challenge_done = c.get("status") == "done"
             status = str(c.get("status", "")).strip().lower()
+            challenge_locked = challenge_is_locked_for_ui(c["challenge_id"])
+            any_challenge_running = st.session_state.get("challenge_mode", False)
 
             st.write(
                 f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
@@ -1917,6 +1957,20 @@ with right:
                     disabled=True
                 )
 
+            elif challenge_locked:
+                st.button(
+                    "🔒 In Progress",
+                    key=f"start_locked_{c['challenge_id']}",
+                    disabled=True
+                )
+
+            elif any_challenge_running:
+                st.button(
+                    "🔒 In Progress",
+                    key=f"start_busy_{c['challenge_id']}",
+                    disabled=True
+                )
+
             elif status == "pending":
                 st.button(
                     "⏳ Waiting for opponent",
@@ -1925,7 +1979,11 @@ with right:
                 )
 
             elif status == "accepted":
-                if st.button(f"Start {c['challenge_id']}", key=f"start_{c['challenge_id']}"):
+                if st.button(
+                    f"Start {c['challenge_id']}",
+                    key=f"start_{c['challenge_id']}",
+                    disabled=any_challenge_running
+                ):
                     try:
                         start_challenge_attempt(c)
                         st.success("Challenge attempt started!")
@@ -2203,11 +2261,9 @@ if st.session_state.challenge_mode and st.session_state.active_domain and st.ses
         f"Question {st.session_state.challenge_count + 1}/{CHALLENGE_QUESTIONS}"
     )
 
-# Auto-load first question in normal mode
 if not st.session_state.challenge_mode and st.session_state.get("question") is None:
     load_question(active_topic, active_diff)
 
-# Auto-load next question in normal mode after submit
 if not st.session_state.challenge_mode and st.session_state.get("pending_auto_next", False):
     st.session_state.pending_auto_next = False
     load_question(active_topic, active_diff)
