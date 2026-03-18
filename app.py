@@ -936,6 +936,9 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
         "question_count": int(question_count),
         "scores": scores,
         "type": "teacher_async_event",
+        "winner_periods": [],
+        "winner_average": 0.0,
+        "result_type": "",
     })
 
     clear_db_caches()
@@ -944,10 +947,38 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
 
 
 def end_challenge_event(event_id: str):
+    snap = event_ref(event_id).get()
+    if not snap.exists:
+        raise ValueError("Event not found.")
+
+    data = snap.to_dict() or {}
+    scores = data.get("scores", {}) or {}
+
+    best_avg = None
+    winners = []
+
+    for _, score_data in scores.items():
+        avg = safe_float(score_data.get("average", 0.0))
+        label = str(score_data.get("label", "")).strip()
+        if not label:
+            continue
+
+        if best_avg is None or avg > best_avg:
+            best_avg = avg
+            winners = [label]
+        elif avg == best_avg:
+            winners.append(label)
+
+    result_type = "tie" if len(winners) > 1 else "win"
+
     event_ref(event_id).set({
         "status": "done",
         "completed_utc": now_utc(),
+        "winner_periods": winners,
+        "winner_average": round(best_avg or 0.0, 2),
+        "result_type": result_type,
     }, merge=True)
+
     clear_db_caches()
     mark_db_data_stale()
 
@@ -995,6 +1026,8 @@ def _complete_event_transaction(transaction, event_id: str, player_id: str, peri
         "score": int(score),
         "question_count": int(question_count),
         "completed_utc": now_utc(),
+        "result_seen": False,
+        "result_seen_utc": None,
     })
 
     transaction.set(eref, {
@@ -1028,6 +1061,63 @@ def student_completed_event(event_id: str, player_id: str) -> bool:
         return snap.exists
     except Exception:
         return False
+
+
+def mark_event_result_seen(event_id: str, player_id: str):
+    if not event_id or not player_id:
+        return
+    try:
+        event_participant_ref(event_id, player_id).set({
+            "result_seen": True,
+            "result_seen_utc": now_utc(),
+        }, merge=True)
+        clear_db_caches()
+        mark_db_data_stale()
+    except Exception:
+        pass
+
+
+def check_and_show_finished_event_result(events: list, player_id: str, student_period: str):
+    for ev in sorted(events, key=lambda x: str(x.get("completed_utc", x.get("created_utc", ""))), reverse=True):
+        if str(ev.get("status", "")).strip().lower() != "done":
+            continue
+
+        eid = str(ev.get("event_id", "")).strip()
+        if not eid:
+            continue
+
+        try:
+            participant_snap = event_participant_ref(eid, player_id).get()
+        except Exception:
+            continue
+
+        if not participant_snap.exists:
+            continue
+
+        participant_data = participant_snap.to_dict() or {}
+        if bool(participant_data.get("result_seen", False)):
+            continue
+
+        winner_periods = ev.get("winner_periods", []) or []
+        result_type = str(ev.get("result_type", "")).strip().lower()
+
+        if result_type == "tie":
+            if student_period in winner_periods:
+                st.session_state.challenge_result_popup_text = "TIE GAME"
+                st.session_state.challenge_result_popup_kind = "tie"
+            else:
+                continue
+        else:
+            if student_period in winner_periods:
+                st.session_state.challenge_result_popup_text = "YOU WON!"
+                st.session_state.challenge_result_popup_kind = "win"
+            else:
+                st.session_state.challenge_result_popup_text = "YOU LOST"
+                st.session_state.challenge_result_popup_kind = "loss"
+
+        st.session_state.challenge_result_popup_nonce += 1
+        mark_event_result_seen(eid, player_id)
+        break
 
 
 # =================================================
@@ -1527,6 +1617,7 @@ st.session_state.setdefault("auth_id_token", "")
 st.session_state.setdefault("auth_refresh_token", "")
 
 st.session_state.setdefault("shown_result_challenge_ids", [])
+st.session_state.setdefault("shown_event_result_ids", [])
 st.session_state.setdefault("latest_result_checked_at", 0)
 st.session_state.setdefault("create_student_form_cleared", False)
 
@@ -1752,6 +1843,12 @@ me = next(
 my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
 
 check_and_show_finished_challenge_result(ch_all, player_id_lower)
+if not is_teacher_user:
+    check_and_show_finished_event_result(
+        all_events,
+        st.session_state.player_id,
+        st.session_state.student_period
+    )
 
 show_xp_popup()
 show_challenge_result_popup()
@@ -1977,7 +2074,7 @@ render_combo_meter(my_streak)
 st.divider()
 
 # =================================================
-# QUESTION PICKER / START HELPERS
+# QUESTION PICKER / CHALLENGE START HELPERS
 # =================================================
 def pick_question(topic_: str, difficulty_: str):
     bank = get_bank(topic_, difficulty_)
@@ -2417,11 +2514,21 @@ if st.session_state.is_teacher:
             if score_rows:
                 st.dataframe(score_rows, use_container_width=True, height=170)
 
+            winner_periods = ev.get("winner_periods", []) or []
+            result_type = str(ev.get("result_type", "")).strip().lower()
+            winner_average = safe_float(ev.get("winner_average", 0.0))
+
+            if ev_status == "done" and winner_periods:
+                if result_type == "tie":
+                    st.info(f"Tie: {', '.join(winner_periods)} • Avg {winner_average}")
+                else:
+                    st.success(f"Winner: {winner_periods[0]} • Avg {winner_average}")
+
             if ev_status == "active":
                 if st.button("End Event", key=f"end_event_{ev.get('event_id', '')}"):
                     try:
                         end_challenge_event(ev.get("event_id", ""))
-                        st.success("Event ended.")
+                        st.success("Event ended and winner announced.")
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
@@ -2693,6 +2800,9 @@ if st.button(
             st.warning("Could not save session log to Firebase.")
             st.code(str(e))
 
+        # -----------------------------
+        # 1v1 CHALLENGE MODE
+        # -----------------------------
         if st.session_state.challenge_mode and st.session_state.challenge_id:
             cid = st.session_state.challenge_id
             st.session_state.challenge_count += 1
@@ -2788,6 +2898,9 @@ if st.button(
                 load_next_question_for_current_mode()
                 st.rerun()
 
+        # -----------------------------
+        # ARENA EVENT MODE
+        # -----------------------------
         elif st.session_state.event_mode and st.session_state.event_id:
             st.session_state.event_count += 1
             if correct:
@@ -2826,6 +2939,9 @@ if st.button(
                 load_next_question_for_current_mode()
                 st.rerun()
 
+        # -----------------------------
+        # NORMAL MODE
+        # -----------------------------
         else:
             st.session_state.processing_submission = False
             st.session_state.pending_auto_next = True
