@@ -13,6 +13,7 @@ from google import genai
 import firebase_admin
 from firebase_admin import credentials, firestore, auth as firebase_auth
 
+# Optional cookie package
 COOKIE_MANAGER_AVAILABLE = True
 try:
     from st_cookies_manager import EncryptedCookieManager
@@ -20,6 +21,9 @@ except Exception:
     COOKIE_MANAGER_AVAILABLE = False
     EncryptedCookieManager = None
 
+# =================================================
+# PAGE CONFIG
+# =================================================
 st.set_page_config(
     page_title="Certiport HTML & CSS Arena 2026",
     page_icon="🌐",
@@ -28,15 +32,23 @@ st.set_page_config(
 st.title("Certiport HTML & CSS Arena 🌐")
 st.caption("Practice like a game: podiums, XP, streaks, challenges, live competition, and teacher arena events.")
 
+# =================================================
+# SAFE SECRETS / ENV
+# =================================================
 def read_secret(key: str, default=None):
     try:
         return st.secrets.get(key, default)
     except Exception:
         return default
 
+
 def read_env(key: str, default=None):
     return os.getenv(key, default)
 
+
+# =================================================
+# KEYS / SETTINGS
+# =================================================
 API_KEY = (
     read_secret("GEMINI_API_KEY")
     or read_secret("GOOGLE_API_KEY")
@@ -89,6 +101,9 @@ RESULT_POPUP_WINDOW_SECONDS = 45
 
 PERIOD_OPTIONS = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"]
 
+# =================================================
+# COOKIES
+# =================================================
 cookies = None
 if COOKIE_MANAGER_AVAILABLE:
     try:
@@ -101,6 +116,9 @@ if COOKIE_MANAGER_AVAILABLE:
     except Exception:
         cookies = None
 
+# =================================================
+# DOMAINS
+# =================================================
 DOMAINS = [
     "1. script, noscript, style, link, meta tags (encoding, keywords, viewport, description)",
     "2. DOCTYPE, html, head, body, proper syntax, closing tags, commonly used symbols",
@@ -121,6 +139,9 @@ DOMAINS = [
     "17. Troubleshooting: syntax errors, tag mismatch, cascading issues",
 ]
 
+# =================================================
+# FALLBACK QUESTIONS
+# =================================================
 FALLBACK_QUESTIONS = [
     {
         "question": "Which tag is used to link an external CSS file?",
@@ -151,8 +172,12 @@ FALLBACK_QUESTIONS = [
     },
 ]
 
+# =================================================
+# HELPERS
+# =================================================
 def now_utc():
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
 
 def safe_int(v, default=0):
     try:
@@ -160,11 +185,13 @@ def safe_int(v, default=0):
     except Exception:
         return default
 
+
 def safe_float(v, default=0.0):
     try:
         return float(v)
     except Exception:
         return default
+
 
 def parse_iso_utc_to_ts(iso_str: str) -> float:
     try:
@@ -174,22 +201,30 @@ def parse_iso_utc_to_ts(iso_str: str) -> float:
     except Exception:
         return 0.0
 
+
 def parse_service_account(raw_value):
     if not raw_value:
         return None
+
     if isinstance(raw_value, dict):
         return raw_value
+
     if isinstance(raw_value, str):
         cleaned = raw_value.strip()
+
         if cleaned.startswith("'''") and cleaned.endswith("'''"):
             cleaned = cleaned[3:-3].strip()
         elif cleaned.startswith('"""') and cleaned.endswith('"""'):
             cleaned = cleaned[3:-3].strip()
+
         return json.loads(cleaned)
+
     raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON must be a JSON string or dict.")
+
 
 def firebase_config_present() -> bool:
     return bool(FIREBASE_SERVICE_ACCOUNT_JSON and str(FIREBASE_SERVICE_ACCOUNT_JSON).strip())
+
 
 def get_teacher_emails():
     raw = str(TEACHER_EMAILS_RAW or "").strip()
@@ -197,21 +232,26 @@ def get_teacher_emails():
         return set()
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
+
 def period_key(period_label: str) -> str:
     key = re.sub(r"[^A-Za-z0-9]+", "_", str(period_label).strip())
     return key.strip("_") or "Other"
 
+
 def challenge_sort_key(challenge_row: dict):
     return str(challenge_row.get("created_utc", ""))
+
 
 def my_challenge_score_field(challenge_row: dict, player_id_lower_: str):
     challenger_name = str(challenge_row.get("challenger", "")).strip().lower()
     opponent_name = str(challenge_row.get("opponent", "")).strip().lower()
+
     if challenger_name == player_id_lower_:
         return "challenger_score"
     if opponent_name == player_id_lower_:
         return "opponent_score"
     return None
+
 
 def my_challenge_already_completed(challenge_row: dict, player_id_lower_: str) -> bool:
     score_field = my_challenge_score_field(challenge_row, player_id_lower_)
@@ -219,13 +259,16 @@ def my_challenge_already_completed(challenge_row: dict, player_id_lower_: str) -
         return False
     return challenge_row.get(score_field) is not None
 
+
 def is_active_challenge(challenge_row: dict) -> bool:
     return challenge_row.get("status") in ("pending", "accepted")
+
 
 def player_has_active_challenge(player_id_value: str, challenges: list) -> bool:
     pid = str(player_id_value).strip().lower()
     if not pid:
         return False
+
     for c in challenges:
         challenger = str(c.get("challenger", "")).strip().lower()
         opponent = str(c.get("opponent", "")).strip().lower()
@@ -233,11 +276,13 @@ def player_has_active_challenge(player_id_value: str, challenges: list) -> bool:
             return True
     return False
 
+
 def challenge_is_locked_for_ui(challenge_id: str) -> bool:
     return (
         st.session_state.get("challenge_mode", False)
         and str(st.session_state.get("challenge_id", "")).strip() == str(challenge_id).strip()
     )
+
 
 def any_quiz_mode_running() -> bool:
     return bool(
@@ -245,20 +290,32 @@ def any_quiz_mode_running() -> bool:
         or st.session_state.get("event_mode", False)
     )
 
+
 def check_and_show_finished_challenge_result(challenges: list, player_id_lower_: str):
     now_ts = time.time()
+
     for c in sorted(challenges, key=challenge_sort_key, reverse=True):
         if c.get("status") != "done":
             continue
+
         cid = str(c.get("challenge_id", "")).strip()
-        if not cid or cid in st.session_state.shown_result_challenge_ids:
+        if not cid:
             continue
+
+        if cid in st.session_state.shown_result_challenge_ids:
+            continue
+
         challenger = str(c.get("challenger", "")).strip().lower()
         opponent = str(c.get("opponent", "")).strip().lower()
+
         if player_id_lower_ not in (challenger, opponent):
             continue
+
         completed_ts = parse_iso_utc_to_ts(str(c.get("completed_utc", "")).strip())
-        if completed_ts <= 0 or now_ts - completed_ts > RESULT_POPUP_WINDOW_SECONDS:
+        if completed_ts <= 0:
+            continue
+
+        if now_ts - completed_ts > RESULT_POPUP_WINDOW_SECONDS:
             continue
 
         cs = safe_int(c.get("challenger_score", 0))
@@ -270,6 +327,7 @@ def check_and_show_finished_challenge_result(challenges: list, player_id_lower_:
         else:
             i_am_challenger = (player_id_lower_ == challenger)
             i_won = (cs > os_) if i_am_challenger else (os_ > cs)
+
             if i_won:
                 st.session_state.challenge_result_popup_text = "YOU WON!"
                 st.session_state.challenge_result_popup_kind = "win"
@@ -282,53 +340,27 @@ def check_and_show_finished_challenge_result(challenges: list, player_id_lower_:
         st.session_state.shown_result_challenge_ids = st.session_state.shown_result_challenge_ids[-100:]
         break
 
-def check_and_show_finished_event_result(events: list, player_id: str, student_period: str):
-    for ev in sorted(events, key=lambda x: str(x.get("completed_utc", x.get("created_utc", ""))), reverse=True):
-        if str(ev.get("status", "")).strip().lower() != "done":
-            continue
 
-        eid = str(ev.get("event_id", "")).strip()
-        if not eid or eid in st.session_state.shown_event_result_ids:
-            continue
-
-        if not student_completed_event(eid, player_id):
-            continue
-
-        winner_periods = ev.get("winner_periods", []) or []
-        result_type = str(ev.get("result_type", "")).strip().lower()
-
-        if result_type == "tie":
-            if student_period in winner_periods:
-                st.session_state.challenge_result_popup_text = "TIE GAME"
-                st.session_state.challenge_result_popup_kind = "tie"
-            else:
-                continue
-        else:
-            if student_period in winner_periods:
-                st.session_state.challenge_result_popup_text = "YOU WON!"
-                st.session_state.challenge_result_popup_kind = "win"
-            else:
-                st.session_state.challenge_result_popup_text = "YOU LOST"
-                st.session_state.challenge_result_popup_kind = "loss"
-
-        st.session_state.challenge_result_popup_nonce += 1
-        st.session_state.shown_event_result_ids.append(eid)
-        st.session_state.shown_event_result_ids = st.session_state.shown_event_result_ids[-200:]
-        break
-
+# =================================================
+# FIREBASE / FIRESTORE
+# =================================================
 @st.cache_resource
 def get_firestore_client():
     creds_dict = parse_service_account(FIREBASE_SERVICE_ACCOUNT_JSON)
     if not creds_dict:
         raise ValueError("Missing FIREBASE_SERVICE_ACCOUNT_JSON in secrets.")
+
     if not firebase_admin._apps:
         cred = credentials.Certificate(creds_dict)
         firebase_admin.initialize_app(cred)
+
     return firestore.client()
+
 
 def check_firestore():
     if not firebase_config_present():
         return False, "Missing FIREBASE_SERVICE_ACCOUNT_JSON in secrets."
+
     try:
         db_ = get_firestore_client()
         list(db_.collection("players").limit(1).stream())
@@ -336,31 +368,44 @@ def check_firestore():
     except Exception as e:
         return False, str(e)
 
+
 def db():
     return get_firestore_client()
+
 
 def player_ref(player_id: str):
     return db().collection("players").document(player_id)
 
+
 def session_ref():
     return db().collection("sessions").document()
+
 
 def challenge_ref(challenge_id: str):
     return db().collection("challenges").document(challenge_id)
 
+
 def event_ref(event_id: str):
     return db().collection("challenge_events").document(event_id)
+
 
 def event_participant_ref(event_id: str, player_id: str):
     return event_ref(event_id).collection("participants").document(player_id)
 
+
 def firestore_enabled():
     return st.session_state.get("firebase_ok", False)
 
+
+# =================================================
+# AUTH
+# =================================================
 def firebase_sign_in_email_password(email: str, password: str):
     if not FIREBASE_WEB_API_KEY.strip():
         raise ValueError("Missing FIREBASE_WEB_API_KEY in secrets.")
+
     get_firestore_client()
+
     url = (
         "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
         f"?key={FIREBASE_WEB_API_KEY}"
@@ -370,6 +415,7 @@ def firebase_sign_in_email_password(email: str, password: str):
         "password": password,
         "returnSecureToken": True,
     }
+
     resp = requests.post(url, json=payload, timeout=20)
     data = resp.json()
 
@@ -390,9 +436,11 @@ def firebase_sign_in_email_password(email: str, password: str):
         "local_id": local_id,
     }
 
+
 def verify_firebase_id_token(id_token: str):
     get_firestore_client()
     return firebase_auth.verify_id_token(id_token)
+
 
 def create_firebase_session_cookie(id_token: str, expires_days: int = 5):
     get_firestore_client()
@@ -402,13 +450,16 @@ def create_firebase_session_cookie(id_token: str, expires_days: int = 5):
         expires_in=expires_in_seconds
     )
 
+
 def verify_firebase_session_cookie(session_cookie: str):
     get_firestore_client()
     return firebase_auth.verify_session_cookie(session_cookie, check_revoked=True)
 
+
 def restore_auth_from_cookie():
     if cookies is None:
         return False
+
     session_cookie = cookies.get("firebase_session", "")
     if not session_cookie:
         return False
@@ -432,12 +483,14 @@ def restore_auth_from_cookie():
         cookies.save()
         return False
 
+
 def persist_auth_cookie(id_token: str):
     if cookies is None:
         return
     session_cookie = create_firebase_session_cookie(id_token, expires_days=5)
     cookies["firebase_session"] = session_cookie
     cookies.save()
+
 
 def sign_out():
     st.session_state.auth_verified = False
@@ -480,6 +533,10 @@ def sign_out():
         cookies["firebase_session"] = ""
         cookies.save()
 
+
+# =================================================
+# FIRESTORE READ LAYER
+# =================================================
 @st.cache_data(ttl=60)
 def load_players():
     docs = db().collection("players").stream()
@@ -491,6 +548,7 @@ def load_players():
         rows.append(data)
     return rows
 
+
 @st.cache_data(ttl=60)
 def load_challenges():
     docs = db().collection("challenges").stream()
@@ -501,6 +559,7 @@ def load_challenges():
             data["challenge_id"] = doc.id
         rows.append(data)
     return rows
+
 
 @st.cache_data(ttl=20)
 def load_challenge_events():
@@ -518,6 +577,7 @@ def load_challenge_events():
         rows.append(data)
     return rows
 
+
 @st.cache_data(ttl=60)
 def load_sessions():
     docs = (
@@ -529,6 +589,7 @@ def load_sessions():
     )
     return [doc.to_dict() or {} for doc in docs]
 
+
 @st.cache_data(ttl=60)
 def load_student_profiles():
     docs = db().collection("student_profiles").stream()
@@ -539,6 +600,7 @@ def load_student_profiles():
         rows.append(data)
     return rows
 
+
 def clear_db_caches():
     load_players.clear()
     load_challenges.clear()
@@ -546,11 +608,14 @@ def clear_db_caches():
     load_sessions.clear()
     load_student_profiles.clear()
 
+
 def mark_db_data_stale():
     st.session_state.last_db_sync = 0
 
+
 def get_app_data():
     now_ts = time.time()
+
     if (
         not st.session_state.leaderboard_cache
         or not st.session_state.challenge_cache
@@ -562,17 +627,25 @@ def get_app_data():
 
     return st.session_state.leaderboard_cache, st.session_state.challenge_cache
 
+
+# =================================================
+# STUDENT PROFILE HELPERS
+# =================================================
 def get_student_profile(uid: str):
     if not uid:
         return None
+
     snap = db().collection("student_profiles").document(uid).get()
     if not snap.exists:
         return None
+
     data = snap.to_dict() or {}
     if not data.get("active", True):
         return None
+
     data["uid"] = snap.id
     return data
+
 
 def create_student_account_and_profile(
     email: str,
@@ -634,6 +707,7 @@ def create_student_account_and_profile(
         "display_name": f"{first_name}-{student_id}",
     }
 
+
 def update_student_profile(uid: str, first_name: str, student_id: str, period: str, active: bool):
     uid = str(uid).strip()
     first_name = first_name.strip()
@@ -674,6 +748,7 @@ def update_student_profile(uid: str, first_name: str, student_id: str, period: s
     clear_db_caches()
     mark_db_data_stale()
 
+
 def set_student_profile_active(uid: str, active: bool):
     uid = str(uid).strip()
     if not uid:
@@ -687,6 +762,7 @@ def set_student_profile_active(uid: str, active: bool):
     clear_db_caches()
     mark_db_data_stale()
 
+
 def delete_student_profile_and_auth(uid: str):
     uid = str(uid).strip()
     if not uid:
@@ -698,6 +774,10 @@ def delete_student_profile_and_auth(uid: str):
     clear_db_caches()
     mark_db_data_stale()
 
+
+# =================================================
+# FIRESTORE WRITE HELPERS
+# =================================================
 def upsert_player(name: str, period: str):
     name = name.strip()
     if not name:
@@ -732,6 +812,7 @@ def upsert_player(name: str, period: str):
 
     clear_db_caches()
     mark_db_data_stale()
+
 
 def add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=0, loss_delta=0):
     name = name.strip()
@@ -774,6 +855,7 @@ def add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=0, 
     clear_db_caches()
     mark_db_data_stale()
 
+
 def log_session(name: str, period: str, score: int, answered: int):
     accuracy = round((score / answered) * 100, 2) if answered else 0.0
     session_ref().set({
@@ -785,6 +867,7 @@ def log_session(name: str, period: str, score: int, answered: int):
         "accuracy": accuracy,
     })
     clear_db_caches()
+
 
 def create_challenge(challenger: str, opponent: str, domain: str, difficulty: str):
     existing = load_challenges()
@@ -812,10 +895,12 @@ def create_challenge(challenger: str, opponent: str, domain: str, difficulty: st
     mark_db_data_stale()
     return ref.id
 
+
 def update_challenge(cid: str, updates: dict):
     challenge_ref(cid).set(updates, merge=True)
     clear_db_caches()
     mark_db_data_stale()
+
 
 def create_challenge_event(title: str, domain: str, difficulty: str, periods: list, question_count: int):
     title = str(title).strip()
@@ -851,50 +936,21 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
         "question_count": int(question_count),
         "scores": scores,
         "type": "teacher_async_event",
-        "winner_periods": [],
-        "winner_average": 0.0,
-        "result_type": "",
     })
 
     clear_db_caches()
     mark_db_data_stale()
     return ref.id
 
+
 def end_challenge_event(event_id: str):
-    snap = event_ref(event_id).get()
-    if not snap.exists:
-        raise ValueError("Event not found.")
-
-    data = snap.to_dict() or {}
-    scores = data.get("scores", {}) or {}
-
-    best_avg = None
-    winners = []
-
-    for _, score_data in scores.items():
-        avg = safe_float(score_data.get("average", 0.0))
-        label = str(score_data.get("label", "")).strip()
-        if not label:
-            continue
-
-        if best_avg is None or avg > best_avg:
-            best_avg = avg
-            winners = [label]
-        elif avg == best_avg:
-            winners.append(label)
-
-    result_type = "tie" if len(winners) > 1 else "win"
-
     event_ref(event_id).set({
         "status": "done",
         "completed_utc": now_utc(),
-        "winner_periods": winners,
-        "winner_average": round(best_avg or 0.0, 2),
-        "result_type": result_type,
     }, merge=True)
-
     clear_db_caches()
     mark_db_data_stale()
+
 
 @firestore.transactional
 def _complete_event_transaction(transaction, event_id: str, player_id: str, period_label: str, score: int, question_count: int):
@@ -948,6 +1004,7 @@ def _complete_event_transaction(transaction, event_id: str, player_id: str, peri
 
     return True
 
+
 def complete_event_attempt(event_id: str, player_id: str, period_label: str, score: int, question_count: int):
     transaction = db().transaction()
     completed = _complete_event_transaction(
@@ -962,6 +1019,7 @@ def complete_event_attempt(event_id: str, player_id: str, period_label: str, sco
     mark_db_data_stale()
     return completed
 
+
 def student_completed_event(event_id: str, player_id: str) -> bool:
     if not event_id or not player_id:
         return False
@@ -971,22 +1029,31 @@ def student_completed_event(event_id: str, player_id: str) -> bool:
     except Exception:
         return False
 
+
+# =================================================
+# SHARED QUESTION BANK - PER DOMAIN
+# =================================================
 @st.cache_resource
 def get_shared_bank():
     return {"lock": threading.Lock(), "bank": {}, "updated": {}}
 
+
 QB = get_shared_bank()
+
 
 def qkey(topic: str, difficulty: str):
     return (topic, difficulty)
+
 
 def bank_size(topic: str, difficulty: str) -> int:
     with QB["lock"]:
         return len(QB["bank"].get(qkey(topic, difficulty), []))
 
+
 def bank_last_updated(topic: str, difficulty: str):
     with QB["lock"]:
         return QB["updated"].get(qkey(topic, difficulty))
+
 
 def add_to_bank(topic: str, difficulty: str, questions: list):
     with QB["lock"]:
@@ -994,11 +1061,16 @@ def add_to_bank(topic: str, difficulty: str, questions: list):
         QB["bank"][qkey(topic, difficulty)].extend(questions)
         QB["updated"][qkey(topic, difficulty)] = now_utc()
 
+
 def get_bank(topic: str, difficulty: str):
     with QB["lock"]:
         QB["bank"].setdefault(qkey(topic, difficulty), [])
         return QB["bank"][qkey(topic, difficulty)]
 
+
+# =================================================
+# GEMINI
+# =================================================
 def parse_batch(raw: str):
     questions = []
     chunks = raw.split("###")
@@ -1455,7 +1527,6 @@ st.session_state.setdefault("auth_id_token", "")
 st.session_state.setdefault("auth_refresh_token", "")
 
 st.session_state.setdefault("shown_result_challenge_ids", [])
-st.session_state.setdefault("shown_event_result_ids", [])
 st.session_state.setdefault("latest_result_checked_at", 0)
 st.session_state.setdefault("create_student_form_cleared", False)
 
@@ -1463,7 +1534,7 @@ st.session_state.setdefault("last_feedback_text", "")
 st.session_state.setdefault("last_feedback_kind", "info")
 
 # =================================================
-# RESTORE AUTH
+# RESTORE AUTH FROM COOKIE FIRST
 # =================================================
 if not st.session_state.auth_verified:
     restore_auth_from_cookie()
@@ -1536,7 +1607,7 @@ if not firestore_enabled():
     st.stop()
 
 # =================================================
-# LOAD STUDENT PROFILE
+# LOAD LOCKED PROFILE FOR STUDENTS
 # =================================================
 auth_user = st.session_state.auth_user or {}
 auth_uid = str(auth_user.get("uid", "")).strip()
@@ -1555,7 +1626,7 @@ if not is_teacher_user:
     st.session_state.id_locked = True
 
 # =================================================
-# IDENTITY UI
+# IN-APP IDENTITY UI
 # =================================================
 st.sidebar.header("Student Identity")
 
@@ -1575,7 +1646,8 @@ if is_teacher_user:
         "Preview Class / Period",
         PERIOD_OPTIONS,
         index=PERIOD_OPTIONS.index(st.session_state.student_period)
-        if st.session_state.student_period in PERIOD_OPTIONS else 0,
+        if st.session_state.student_period in PERIOD_OPTIONS
+        else 0,
         key="sidebar_student_period_select"
     )
 
@@ -1631,13 +1703,21 @@ st.sidebar.success("✅ Persistent mode: Firebase Firestore")
 # =================================================
 if st.session_state.get("is_teacher", False):
     if not any_quiz_mode_running() and not st.session_state.get("is_generating", False):
-        st_autorefresh(interval=60 * 1000, limit=None, key="teacher_live_refresh_timer")
+        st_autorefresh(
+            interval=60 * 1000,
+            limit=None,
+            key="teacher_live_refresh_timer"
+        )
         st.sidebar.caption("🔄 Teacher refresh every 60 seconds")
     else:
         st.sidebar.caption("⏸ Teacher refresh paused during active play or generation")
 else:
     if not any_quiz_mode_running():
-        st_autorefresh(interval=30 * 1000, limit=None, key="student_refresh_timer")
+        st_autorefresh(
+            interval=30 * 1000,
+            limit=None,
+            key="student_refresh_timer"
+        )
         st.sidebar.caption("🔄 Refresh every 30 seconds")
     else:
         st.sidebar.caption("⏸ Auto-refresh paused during active play")
@@ -1646,7 +1726,7 @@ else:
         st.rerun()
 
 # =================================================
-# DATA FETCH
+# SINGLE DATA FETCH
 # =================================================
 try:
     lb, ch_all = get_app_data()
@@ -1665,22 +1745,19 @@ except Exception as e:
 lb_sorted = sorted(lb, key=lambda r: safe_int(r.get("xp", 0)), reverse=True)
 
 player_id_lower = st.session_state.player_id.strip().lower()
-me = next((r for r in lb if str(r.get("name", "")).strip().lower() == player_id_lower), {})
+me = next(
+    (r for r in lb if str(r.get("name", "")).strip().lower() == player_id_lower),
+    {}
+)
 my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
 
 check_and_show_finished_challenge_result(ch_all, player_id_lower)
-if not is_teacher_user:
-    check_and_show_finished_event_result(
-        all_events,
-        st.session_state.player_id,
-        st.session_state.student_period
-    )
 
 show_xp_popup()
 show_challenge_result_popup()
 
 # =================================================
-# EVENT HELPERS
+# EVENT HELPERS AFTER LOAD
 # =================================================
 def student_eligible_events(events: list, student_period: str, player_id: str):
     rows = []
@@ -1693,6 +1770,7 @@ def student_eligible_events(events: list, student_period: str, player_id: str):
             continue
         rows.append(ev)
     return rows
+
 
 eligible_events = []
 if not is_teacher_user:
@@ -1711,6 +1789,7 @@ st.markdown("## 🏆 Live Classroom Leaderboard")
 st.caption("Global leaderboard across all domains.")
 
 pod = lb_sorted[:3] + [{}] * max(0, 3 - len(lb_sorted))
+
 col_left, col_mid, col_right = st.columns([1, 1.2, 1])
 
 with col_left:
@@ -1808,7 +1887,7 @@ for i, r in enumerate(lb_sorted[:25], start=1):
 st.dataframe(top_rows, use_container_width=True, height=340)
 
 # =================================================
-# CHALLENGE FROM LEADERBOARD
+# CHALLENGE DIRECTLY FROM LEADERBOARD
 # =================================================
 st.markdown("### ⚔️ Challenge Directly From the Leaderboard")
 
@@ -1859,7 +1938,7 @@ for i, r in enumerate(lb_sorted[:10], start=1):
                     st.code(str(e))
 
 # =================================================
-# PERIOD COMPETITION
+# PERIOD VS PERIOD
 # =================================================
 st.markdown("## 🏫 Period vs Period Competition")
 
@@ -1992,8 +2071,9 @@ def start_event_attempt(event_row: dict):
     st.session_state.active_difficulty = event_row["difficulty"]
     load_question(event_row["domain"], event_row["difficulty"])
 
+
 # =================================================
-# ARENA EVENTS UI
+# ASYNC EVENT UI
 # =================================================
 st.markdown("## 🏟️ Arena Events")
 
@@ -2002,18 +2082,9 @@ if is_teacher_user:
         st.caption("No active teacher events right now.")
     else:
         for ev in active_event_rows[:5]:
-            winner_periods = ev.get("winner_periods", []) or []
-            result_type = str(ev.get("result_type", "")).strip().lower()
-
             st.markdown(
                 f"**{ev.get('title', 'Arena Event')}** • {ev.get('domain', '')} • {ev.get('difficulty', '')} • Questions: {safe_int(ev.get('question_count', 0))}"
             )
-
-            if str(ev.get("status", "")).strip().lower() == "done":
-                if result_type == "tie":
-                    st.info(f"Tie: {', '.join(winner_periods)}")
-                elif winner_periods:
-                    st.success(f"Winner: {winner_periods[0]}")
 else:
     if not eligible_events:
         st.caption("No available arena event for your period right now.")
@@ -2234,7 +2305,8 @@ if st.session_state.is_teacher:
                         "Edit Period",
                         PERIOD_OPTIONS,
                         index=PERIOD_OPTIONS.index(selected_student.get("period", "Other"))
-                        if selected_student.get("period", "Other") in PERIOD_OPTIONS else 0,
+                        if selected_student.get("period", "Other") in PERIOD_OPTIONS
+                        else 0,
                         key="teacher_student_period_edit_select"
                     )
                     edit_active = st.checkbox("Edit Active", value=bool(selected_student.get("active", True)))
@@ -2345,21 +2417,11 @@ if st.session_state.is_teacher:
             if score_rows:
                 st.dataframe(score_rows, use_container_width=True, height=170)
 
-            winner_periods = ev.get("winner_periods", []) or []
-            result_type = str(ev.get("result_type", "")).strip().lower()
-            winner_average = safe_float(ev.get("winner_average", 0.0))
-
-            if ev_status == "done" and winner_periods:
-                if result_type == "tie":
-                    st.info(f"Tie: {', '.join(winner_periods)} • Avg {winner_average}")
-                else:
-                    st.success(f"Winner: {winner_periods[0]} • Avg {winner_average}")
-
             if ev_status == "active":
                 if st.button("End Event", key=f"end_event_{ev.get('event_id', '')}"):
                     try:
                         end_challenge_event(ev.get("event_id", ""))
-                        st.success("Event ended and winner announced.")
+                        st.success("Event ended.")
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
@@ -2631,7 +2693,6 @@ if st.button(
             st.warning("Could not save session log to Firebase.")
             st.code(str(e))
 
-        # 1v1 challenge mode
         if st.session_state.challenge_mode and st.session_state.challenge_id:
             cid = st.session_state.challenge_id
             st.session_state.challenge_count += 1
@@ -2727,7 +2788,6 @@ if st.button(
                 load_next_question_for_current_mode()
                 st.rerun()
 
-        # arena event mode
         elif st.session_state.event_mode and st.session_state.event_id:
             st.session_state.event_count += 1
             if correct:
@@ -2766,7 +2826,6 @@ if st.button(
                 load_next_question_for_current_mode()
                 st.rerun()
 
-        # normal mode
         else:
             st.session_state.processing_submission = False
             st.session_state.pending_auto_next = True
