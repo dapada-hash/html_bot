@@ -238,6 +238,32 @@ def period_key(period_label: str) -> str:
     return key.strip("_") or "Other"
 
 
+def event_mode_from_title(title: str) -> str:
+    raw = str(title or "").strip().lower()
+    if raw.startswith("[class]") or raw.startswith("class:") or raw.startswith("class "):
+        return "class"
+    return "period"
+
+
+def clean_event_title(title: str) -> str:
+    raw = str(title or "").strip()
+    lowered = raw.lower()
+
+    if lowered.startswith("[class]"):
+        cleaned = raw[7:].strip()
+        return cleaned or "HTML Arena Event"
+
+    if lowered.startswith("class:"):
+        cleaned = raw[6:].strip()
+        return cleaned or "HTML Arena Event"
+
+    if lowered.startswith("class "):
+        cleaned = raw[6:].strip()
+        return cleaned or "HTML Arena Event"
+
+    return raw or "HTML Arena Event"
+
+
 def challenge_sort_key(challenge_row: dict):
     return str(challenge_row.get("created_utc", ""))
 
@@ -574,6 +600,8 @@ def load_challenge_events():
         data = doc.to_dict() or {}
         if "event_id" not in data:
             data["event_id"] = doc.id
+        if "mode" not in data:
+            data["mode"] = "period"
         rows.append(data)
     return rows
 
@@ -913,20 +941,24 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
     if question_count < 1:
         raise ValueError("Question count must be at least 1.")
 
+    event_mode = event_mode_from_title(title)
+    display_title = clean_event_title(title)
+
     scores = {}
-    for p in periods:
-        pk = period_key(p)
-        scores[pk] = {
-            "label": p,
-            "total": 0,
-            "count": 0,
-            "average": 0.0,
-        }
+    if event_mode == "period":
+        for p in periods:
+            pk = period_key(p)
+            scores[pk] = {
+                "label": p,
+                "total": 0,
+                "count": 0,
+                "average": 0.0,
+            }
 
     ref = db().collection("challenge_events").document()
     ref.set({
         "event_id": ref.id,
-        "title": title,
+        "title": display_title,
         "created_utc": now_utc(),
         "completed_utc": None,
         "domain": domain,
@@ -935,9 +967,13 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
         "periods": periods,
         "question_count": int(question_count),
         "scores": scores,
+        "class_scores": {},
+        "mode": event_mode,
         "type": "teacher_async_event",
         "winner_periods": [],
+        "winner_players": [],
         "winner_average": 0.0,
+        "winner_score": 0,
         "result_type": "",
     })
 
@@ -952,32 +988,68 @@ def end_challenge_event(event_id: str):
         raise ValueError("Event not found.")
 
     data = snap.to_dict() or {}
-    scores = data.get("scores", {}) or {}
+    event_mode = str(data.get("mode", "period")).strip().lower()
 
-    best_avg = None
-    winners = []
+    if event_mode == "class":
+        class_scores = data.get("class_scores", {}) or {}
 
-    for _, score_data in scores.items():
-        avg = safe_float(score_data.get("average", 0.0))
-        label = str(score_data.get("label", "")).strip()
-        if not label:
-            continue
+        best_score = None
+        winners = []
 
-        if best_avg is None or avg > best_avg:
-            best_avg = avg
-            winners = [label]
-        elif avg == best_avg:
-            winners.append(label)
+        for _, row in class_scores.items():
+            player_name = str(row.get("player_id", "")).strip()
+            score = safe_int(row.get("score", 0))
 
-    result_type = "tie" if len(winners) > 1 else "win"
+            if not player_name:
+                continue
 
-    event_ref(event_id).set({
-        "status": "done",
-        "completed_utc": now_utc(),
-        "winner_periods": winners,
-        "winner_average": round(best_avg or 0.0, 2),
-        "result_type": result_type,
-    }, merge=True)
+            if best_score is None or score > best_score:
+                best_score = score
+                winners = [player_name]
+            elif score == best_score:
+                winners.append(player_name)
+
+        result_type = "tie" if len(winners) > 1 else "win"
+
+        event_ref(event_id).set({
+            "status": "done",
+            "completed_utc": now_utc(),
+            "winner_players": winners,
+            "winner_score": safe_int(best_score, 0),
+            "winner_average": 0.0,
+            "winner_periods": [],
+            "result_type": result_type,
+        }, merge=True)
+
+    else:
+        scores = data.get("scores", {}) or {}
+
+        best_avg = None
+        winners = []
+
+        for _, score_data in scores.items():
+            avg = safe_float(score_data.get("average", 0.0))
+            label = str(score_data.get("label", "")).strip()
+            if not label:
+                continue
+
+            if best_avg is None or avg > best_avg:
+                best_avg = avg
+                winners = [label]
+            elif avg == best_avg:
+                winners.append(label)
+
+        result_type = "tie" if len(winners) > 1 else "win"
+
+        event_ref(event_id).set({
+            "status": "done",
+            "completed_utc": now_utc(),
+            "winner_periods": winners,
+            "winner_average": round(best_avg or 0.0, 2),
+            "winner_players": [],
+            "winner_score": 0,
+            "result_type": result_type,
+        }, merge=True)
 
     clear_db_caches()
     mark_db_data_stale()
@@ -1002,23 +1074,7 @@ def _complete_event_transaction(transaction, event_id: str, player_id: str, peri
     if part_snap.exists:
         return False
 
-    pk = period_key(period_label)
-    scores = event_data.get("scores", {}) or {}
-
-    if pk not in scores:
-        scores[pk] = {
-            "label": period_label,
-            "total": 0,
-            "count": 0,
-            "average": 0.0,
-        }
-
-    scores[pk]["total"] = safe_int(scores[pk].get("total", 0)) + int(score)
-    scores[pk]["count"] = safe_int(scores[pk].get("count", 0)) + 1
-    scores[pk]["average"] = round(
-        scores[pk]["total"] / max(1, scores[pk]["count"]),
-        2
-    )
+    event_mode = str(event_data.get("mode", "period")).strip().lower()
 
     transaction.set(pref, {
         "player_id": player_id,
@@ -1030,10 +1086,45 @@ def _complete_event_transaction(transaction, event_id: str, player_id: str, peri
         "result_seen_utc": None,
     })
 
-    transaction.set(eref, {
-        "scores": scores,
-        "updated_utc": now_utc(),
-    }, merge=True)
+    if event_mode == "class":
+        class_scores = event_data.get("class_scores", {}) or {}
+
+        class_scores[player_id] = {
+            "player_id": player_id,
+            "period": period_label,
+            "score": int(score),
+            "question_count": int(question_count),
+            "completed_utc": now_utc(),
+        }
+
+        transaction.set(eref, {
+            "class_scores": class_scores,
+            "updated_utc": now_utc(),
+        }, merge=True)
+
+    else:
+        pk = period_key(period_label)
+        scores = event_data.get("scores", {}) or {}
+
+        if pk not in scores:
+            scores[pk] = {
+                "label": period_label,
+                "total": 0,
+                "count": 0,
+                "average": 0.0,
+            }
+
+        scores[pk]["total"] = safe_int(scores[pk].get("total", 0)) + int(score)
+        scores[pk]["count"] = safe_int(scores[pk].get("count", 0)) + 1
+        scores[pk]["average"] = round(
+            scores[pk]["total"] / max(1, scores[pk]["count"]),
+            2
+        )
+
+        transaction.set(eref, {
+            "scores": scores,
+            "updated_utc": now_utc(),
+        }, merge=True)
 
     return True
 
@@ -1098,22 +1189,42 @@ def check_and_show_finished_event_result(events: list, player_id: str, student_p
         if bool(participant_data.get("result_seen", False)):
             continue
 
-        winner_periods = ev.get("winner_periods", []) or []
+        event_mode = str(ev.get("mode", "period")).strip().lower()
         result_type = str(ev.get("result_type", "")).strip().lower()
 
-        if result_type == "tie":
-            if student_period in winner_periods:
-                st.session_state.challenge_result_popup_text = "TIE GAME"
-                st.session_state.challenge_result_popup_kind = "tie"
+        if event_mode == "class":
+            winner_players = ev.get("winner_players", []) or []
+
+            if result_type == "tie":
+                if player_id in winner_players:
+                    st.session_state.challenge_result_popup_text = "TIE GAME"
+                    st.session_state.challenge_result_popup_kind = "tie"
+                else:
+                    st.session_state.challenge_result_popup_text = "YOU LOST"
+                    st.session_state.challenge_result_popup_kind = "loss"
             else:
-                continue
+                if player_id in winner_players:
+                    st.session_state.challenge_result_popup_text = "YOU WON!"
+                    st.session_state.challenge_result_popup_kind = "win"
+                else:
+                    st.session_state.challenge_result_popup_text = "YOU LOST"
+                    st.session_state.challenge_result_popup_kind = "loss"
         else:
-            if student_period in winner_periods:
-                st.session_state.challenge_result_popup_text = "YOU WON!"
-                st.session_state.challenge_result_popup_kind = "win"
+            winner_periods = ev.get("winner_periods", []) or []
+
+            if result_type == "tie":
+                if student_period in winner_periods:
+                    st.session_state.challenge_result_popup_text = "TIE GAME"
+                    st.session_state.challenge_result_popup_kind = "tie"
+                else:
+                    continue
             else:
-                st.session_state.challenge_result_popup_text = "YOU LOST"
-                st.session_state.challenge_result_popup_kind = "loss"
+                if student_period in winner_periods:
+                    st.session_state.challenge_result_popup_text = "YOU WON!"
+                    st.session_state.challenge_result_popup_kind = "win"
+                else:
+                    st.session_state.challenge_result_popup_text = "YOU LOST"
+                    st.session_state.challenge_result_popup_kind = "loss"
 
         st.session_state.challenge_result_popup_nonce += 1
         mark_event_result_seen(eid, player_id)
@@ -2180,8 +2291,9 @@ if is_teacher_user:
         st.caption("No active teacher events right now.")
     else:
         for ev in active_event_rows[:5]:
+            event_mode_label = "Class Event" if str(ev.get("mode", "period")).strip().lower() == "class" else "Period Event"
             st.markdown(
-                f"**{ev.get('title', 'Arena Event')}** • {ev.get('domain', '')} • {ev.get('difficulty', '')} • Questions: {safe_int(ev.get('question_count', 0))}"
+                f"**{ev.get('title', 'Arena Event')}** • {event_mode_label} • {ev.get('domain', '')} • {ev.get('difficulty', '')} • Questions: {safe_int(ev.get('question_count', 0))}"
             )
 else:
     if not eligible_events:
@@ -2189,8 +2301,9 @@ else:
     else:
         for ev in eligible_events[:3]:
             btn_disabled = any_quiz_mode_running()
+            event_mode_label = "Class Event" if str(ev.get("mode", "period")).strip().lower() == "class" else "Period Event"
             st.write(
-                f"**{ev.get('title', 'Arena Event')}** • **{ev.get('domain', '')}** ({ev.get('difficulty', '')}) • Questions: {safe_int(ev.get('question_count', CHALLENGE_QUESTIONS))}"
+                f"**{ev.get('title', 'Arena Event')}** • **{event_mode_label}** • **{ev.get('domain', '')}** ({ev.get('difficulty', '')}) • Questions: {safe_int(ev.get('question_count', CHALLENGE_QUESTIONS))}"
             )
             if st.button(
                 "🚀 Start Arena Event",
@@ -2454,6 +2567,7 @@ if st.session_state.is_teacher:
     st.divider()
 
     st.markdown("### 🏟️ Teacher Arena Event")
+    st.caption("Tip: Start the title with [CLASS] to create a class event. Example: [CLASS] HTML Arena Event")
 
     with st.form("teacher_create_event_form"):
         ev1, ev2 = st.columns(2)
@@ -2529,34 +2643,64 @@ if st.session_state.is_teacher:
 
         for ev in paged_events:
             ev_status = str(ev.get("status", "")).strip().lower()
+            ev_mode = str(ev.get("mode", "period")).strip().lower()
             title_text = ev.get("title", "Arena Event")
+            mode_label = "Class Event" if ev_mode == "class" else "Period Event"
+
             st.markdown(
-                f"**{title_text}** • **{ev.get('domain', '')}** ({ev.get('difficulty', '')}) • "
+                f"**{title_text}** • **{mode_label}** • **{ev.get('domain', '')}** ({ev.get('difficulty', '')}) • "
                 f"Questions: {safe_int(ev.get('question_count', 0))} • Status: `{ev_status}`"
             )
 
-            scores = ev.get("scores", {}) or {}
-            score_rows = []
-            for score_key, score_data in scores.items():
-                score_rows.append({
-                    "Period": score_data.get("label", score_key),
-                    "Total Score": safe_int(score_data.get("total", 0)),
-                    "Participants": safe_int(score_data.get("count", 0)),
-                    "Average": safe_float(score_data.get("average", 0.0)),
-                })
+            if ev_mode == "class":
+                class_scores = ev.get("class_scores", {}) or {}
+                class_rows = []
 
-            if score_rows:
-                st.dataframe(score_rows, use_container_width=True, height=170)
+                for _, row in class_scores.items():
+                    class_rows.append({
+                        "Player": row.get("player_id", ""),
+                        "Period": row.get("period", ""),
+                        "Score": safe_int(row.get("score", 0)),
+                        "Questions": safe_int(row.get("question_count", 0)),
+                    })
 
-            winner_periods = ev.get("winner_periods", []) or []
-            result_type = str(ev.get("result_type", "")).strip().lower()
-            winner_average = safe_float(ev.get("winner_average", 0.0))
+                if class_rows:
+                    class_rows = sorted(class_rows, key=lambda x: x["Score"], reverse=True)
+                    st.dataframe(class_rows, use_container_width=True, height=170)
 
-            if ev_status == "done" and winner_periods:
-                if result_type == "tie":
-                    st.info(f"Tie: {', '.join(winner_periods)} • Avg {winner_average}")
-                else:
-                    st.success(f"Winner: {winner_periods[0]} • Avg {winner_average}")
+                winner_players = ev.get("winner_players", []) or []
+                result_type = str(ev.get("result_type", "")).strip().lower()
+                winner_score = safe_int(ev.get("winner_score", 0))
+
+                if ev_status == "done" and winner_players:
+                    if result_type == "tie":
+                        st.info(f"Tie: {', '.join(winner_players)} • Score {winner_score}")
+                    else:
+                        st.success(f"Winner: {winner_players[0]} • Score {winner_score}")
+
+            else:
+                scores = ev.get("scores", {}) or {}
+                score_rows = []
+                for score_key, score_data in scores.items():
+                    score_rows.append({
+                        "Period": score_data.get("label", score_key),
+                        "Total Score": safe_int(score_data.get("total", 0)),
+                        "Participants": safe_int(score_data.get("count", 0)),
+                        "Average": safe_float(score_data.get("average", 0.0)),
+                    })
+
+                if score_rows:
+                    st.dataframe(score_rows, use_container_width=True, height=170)
+
+                winner_periods = ev.get("winner_periods", []) or []
+                result_type = str(ev.get("result_type", "")).strip().lower()
+                winner_average = safe_float(ev.get("winner_average", 0.0))
+
+                if ev_status == "done" and winner_periods:
+                    if result_type == "tie":
+                        st.info(f"Tie: {', '.join(winner_periods)} • Avg {winner_average}")
+                    else:
+                        st.success(f"Winner: {winner_periods[0]} • Avg {winner_average}")
 
             if ev_status == "active":
                 if st.button("End Event", key=f"end_event_{ev.get('event_id', '')}"):
