@@ -1250,23 +1250,6 @@ def render_combo_meter(streak_value: int):
     )
 
 
-def show_last_feedback():
-    text = st.session_state.get("last_feedback_text", "").strip()
-    kind = st.session_state.get("last_feedback_kind", "info")
-
-    if not text:
-        return
-
-    if kind == "success":
-        st.success(text)
-    elif kind == "error":
-        st.error(text)
-    elif kind == "warning":
-        st.warning(text)
-    else:
-        st.info(text)
-
-
 # =================================================
 # SESSION STATE
 # =================================================
@@ -1276,8 +1259,6 @@ st.session_state.setdefault("answered", False)
 st.session_state.setdefault("question", None)
 st.session_state.setdefault("next_allowed_time", 0.0)
 st.session_state.setdefault("submit_locked", False)
-st.session_state.setdefault("processing_submission", False)
-st.session_state.setdefault("pending_auto_next", False)
 st.session_state.setdefault("question_token", "")
 st.session_state.setdefault("answered_tokens", [])
 st.session_state.setdefault("last_challenge_sent_at", 0.0)
@@ -1327,9 +1308,6 @@ st.session_state.setdefault("auth_refresh_token", "")
 st.session_state.setdefault("shown_result_challenge_ids", [])
 st.session_state.setdefault("latest_result_checked_at", 0)
 st.session_state.setdefault("create_student_form_cleared", False)
-
-st.session_state.setdefault("last_feedback_text", "")
-st.session_state.setdefault("last_feedback_kind", "info")
 
 # =================================================
 # RESTORE AUTH FROM COOKIE FIRST
@@ -1779,7 +1757,6 @@ def load_question(topic_: str, difficulty_: str):
     st.session_state.question = pick_question(topic_, difficulty_)
     st.session_state.answered = False
     st.session_state.submit_locked = False
-    st.session_state.processing_submission = False
     st.session_state.question_token = f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
 
     st.session_state.answer_widget_nonce += 1
@@ -2203,15 +2180,6 @@ if st.session_state.challenge_mode and st.session_state.active_domain and st.ses
         f"Question {st.session_state.challenge_count + 1}/{CHALLENGE_QUESTIONS}"
     )
 
-# Auto-load first question in normal mode
-if not st.session_state.challenge_mode and st.session_state.get("question") is None:
-    load_question(active_topic, active_diff)
-
-# Auto-load next question in normal mode after submit
-if not st.session_state.challenge_mode and st.session_state.get("pending_auto_next", False):
-    st.session_state.pending_auto_next = False
-    load_question(active_topic, active_diff)
-
 cooldown = int(max(0, st.session_state.next_allowed_time - time.time()))
 if cooldown > 0:
     st.caption(f"Cooldown: {cooldown}s")
@@ -2219,11 +2187,9 @@ if cooldown > 0:
 if not st.session_state.challenge_mode:
     if st.button(
         "Next Question",
-        disabled=cooldown > 0 or st.session_state.submit_locked or st.session_state.processing_submission,
+        disabled=cooldown > 0 or st.session_state.submit_locked,
         key="next_question_btn"
     ):
-        st.session_state.last_feedback_text = ""
-        st.session_state.last_feedback_kind = "info"
         load_question(active_topic, active_diff)
 
 q = st.session_state.get("question")
@@ -2231,10 +2197,8 @@ if not q:
     if st.session_state.challenge_mode:
         st.info("Challenge is ready. Your first question should load automatically.")
     else:
-        st.info("Loading question...")
+        st.info("Click **Next Question** to begin.")
     st.stop()
-
-show_last_feedback()
 
 st.markdown("## 🧠 Question")
 st.markdown(q["question"])
@@ -2251,37 +2215,30 @@ st.radio(
     index=None,
     horizontal=True,
     key=current_answer_widget_key,
-    disabled=st.session_state.answered or st.session_state.processing_submission
+    disabled=st.session_state.answered
 )
 
 selected_answer = st.session_state.get(current_answer_widget_key, None)
 
 if st.button(
     "Submit Answer",
-    disabled=st.session_state.submit_locked or st.session_state.answered or st.session_state.processing_submission,
+    disabled=st.session_state.submit_locked or st.session_state.answered,
     key="submit_answer_btn"
 ):
-    token = st.session_state.get("question_token", "")
-
-    if st.session_state.processing_submission:
-        st.warning("Submission already in progress.")
-    elif selected_answer is None:
+    if selected_answer is None:
         st.warning("Select an answer first.")
     elif st.session_state.answered:
         st.warning("Already submitted.")
-    elif token and token in st.session_state.answered_tokens:
-        st.warning("This question was already submitted.")
     else:
-        st.session_state.processing_submission = True
+        token = st.session_state.get("question_token", "")
+        if token and token in st.session_state.answered_tokens:
+            st.warning("This question was already submitted.")
+            st.stop()
+
         st.session_state.submit_locked = True
         st.session_state.id_locked = True
         st.session_state.answered = True
         st.session_state.total_answered += 1
-
-        if token:
-            st.session_state.answered_tokens = [t for t in st.session_state.answered_tokens if t != token]
-            st.session_state.answered_tokens.append(token)
-            st.session_state.answered_tokens = st.session_state.answered_tokens[-200:]
 
         correct = (selected_answer == q["correct"])
 
@@ -2301,14 +2258,16 @@ if st.button(
 
             if bonus:
                 st.session_state.xp_popup_text = f"+{XP_CORRECT} XP\n🔥 Streak Bonus +{bonus}"
-                st.session_state.last_feedback_text = f"✅ Correct! +{XP_CORRECT} XP • 🔥 Streak bonus +{bonus} XP\n\n{q['explanation']}"
             else:
                 st.session_state.xp_popup_text = f"+{XP_CORRECT} XP"
-                st.session_state.last_feedback_text = f"✅ Correct! +{XP_CORRECT} XP\n\n{q['explanation']}"
 
             st.session_state.xp_popup_kind = "good"
             st.session_state.xp_popup_nonce += 1
-            st.session_state.last_feedback_kind = "success"
+
+            if bonus:
+                st.success(f"✅ Correct! +{XP_CORRECT} XP  🔥 Streak bonus +{bonus} XP!")
+            else:
+                st.success(f"✅ Correct! +{XP_CORRECT} XP")
         else:
             try:
                 add_xp_and_streak(st.session_state.player_id, XP_WRONG, -999)
@@ -2321,8 +2280,14 @@ if st.button(
             st.session_state.xp_popup_kind = "warn"
             st.session_state.xp_popup_nonce += 1
 
-            st.session_state.last_feedback_text = f"❌ Incorrect. Correct answer: {q['correct']}\n\n{q['explanation']}"
-            st.session_state.last_feedback_kind = "error"
+            st.error(f"❌ Incorrect. Correct answer: {q['correct']}")
+
+        if token:
+            st.session_state.answered_tokens = [t for t in st.session_state.answered_tokens if t != token]
+            st.session_state.answered_tokens.append(token)
+            st.session_state.answered_tokens = st.session_state.answered_tokens[-200:]
+
+        st.info(q["explanation"])
 
         try:
             log_session(
@@ -2423,13 +2388,7 @@ if st.button(
                 st.session_state.challenge_correct = 0
                 st.session_state.active_domain = None
                 st.session_state.active_difficulty = None
-                st.session_state.processing_submission = False
                 st.info("Challenge finished.")
             else:
-                st.session_state.processing_submission = False
                 load_next_question_for_current_mode()
                 st.rerun()
-        else:
-            st.session_state.processing_submission = False
-            st.session_state.pending_auto_next = True
-            st.rerun()
