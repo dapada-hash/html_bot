@@ -99,7 +99,7 @@ COOLDOWN_SECONDS = 1
 MAX_CHALLENGE_HISTORY_PER_COLUMN = 2
 RESULT_POPUP_WINDOW_SECONDS = 45
 
-PERIOD_OPTIONS = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Other"]
+PERIOD_OPTIONS = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6","Period 7", "Period 8", "Other"]
 
 # =================================================
 # COOKIES
