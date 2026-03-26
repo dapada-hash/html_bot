@@ -1136,8 +1136,6 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
     clear_db_caches()
     mark_db_data_stale()
     return ref.id
-
-
 def end_challenge_event(event_id: str):
     snap = event_ref(event_id).get()
     if not snap.exists:
@@ -1388,309 +1386,8 @@ def check_and_show_finished_event_result(events: list, player_id: str, student_p
 
 
 # =================================================
-# QUESTION BANK API
-# =================================================
-def bank_size(topic: str, difficulty: str) -> int:
-    data = load_bank_from_firestore(topic, difficulty)
-    return len(data.get("questions", []) or [])
-
-
-def bank_last_updated(topic: str, difficulty: str):
-    data = load_bank_from_firestore(topic, difficulty)
-    return data.get("updated", None)
-
-
-def add_to_bank(topic: str, difficulty: str, questions: list):
-    append_questions_to_firestore_bank(topic, difficulty, questions)
-
-
-def get_bank(topic: str, difficulty: str):
-    data = load_bank_from_firestore(topic, difficulty)
-    return data.get("questions", []) or []
-
-
-# =================================================
-# GEMINI
-# =================================================
-def parse_batch(raw: str):
-    questions = []
-    chunks = raw.split("###")
-    for chunk in chunks:
-        try:
-            q = re.search(r"QUESTION:\s*(.*?)(?=\nA\))", chunk, re.S).group(1)
-            A = re.search(r"\nA\)\s*(.*)", chunk).group(1)
-            B = re.search(r"\nB\)\s*(.*)", chunk).group(1)
-            C = re.search(r"\nC\)\s*(.*)", chunk).group(1)
-            D = re.search(r"\nD\)\s*(.*)", chunk).group(1)
-            correct = re.search(r"CORRECT:\s*([ABCD])", chunk).group(1)
-            explanation = re.search(r"EXPLANATION:\s*(.*)", chunk, re.S).group(1)
-            questions.append({
-                "question": q.strip(),
-                "A": A.strip(),
-                "B": B.strip(),
-                "C": C.strip(),
-                "D": D.strip(),
-                "correct": correct.strip().upper(),
-                "explanation": explanation.strip(),
-            })
-        except Exception:
-            pass
-    return questions
-
-
-def fetch_questions_from_gemini(topic: str, difficulty: str, count: int):
-    prompt = f"""
-You are a Certiport HTML/CSS certification exam writer.
-Create exactly {count} questions for a classroom quiz game.
-
-DOMAIN: {topic}
-DIFFICULTY: {difficulty}
-
-IMPORTANT:
-- Mix the question styles across the batch.
-- Use these 3 styles:
-  1. Standard multiple choice
-  2. True/False
-  3. Ordering-as-multiple-choice
-
-QUESTION STYLE RULES:
-- At least some questions should be standard MCQ.
-- At least some questions should be True/False.
-- At least some questions should be ordering questions written as MCQ choices.
-- Do NOT use drag-and-drop.
-- Do NOT require free response.
-- Every question must still fit this exact answer model:
-  A, B, C, or D
-
-CONTENT RULES:
-- Focus strictly on this HTML/CSS domain.
-- Use Certiport-style HTML/CSS questions.
-- Include short HTML/CSS snippets when helpful.
-- Ask about syntax, structure, styling, selectors, accessibility, responsive design, semantics, links, forms, media, and troubleshooting.
-- Use realistic distractors.
-- Use backticks around code when useful.
-
-TRUE/FALSE RULES:
-- For True/False questions, still format the answers as:
-  A) True
-  B) False
-  C) Not used
-  D) Not used
-- Correct answer must be A or B only.
-
-ORDERING RULES:
-- For ordering questions, ask students to choose the correct sequence.
-- Example style:
-  QUESTION: Put the following steps in the correct order...
-  A) 1, 2, 3, 4
-  B) 1, 3, 2, 4
-  C) 2, 1, 3, 4
-  D) 3, 1, 2, 4
-- Do NOT ask students to manually rearrange items.
-- Ordering questions must still be answerable with A/B/C/D.
-
-FORMAT (MUST MATCH EXACTLY):
-- Each question separated by a line containing ONLY: ###
-- Each question uses EXACT labels:
-
-QUESTION: ...
-A) ...
-B) ...
-C) ...
-D) ...
-CORRECT: A/B/C/D
-EXPLANATION: ...
-
-No extra text before the first QUESTION:
-""".strip()
-
-    if not API_KEY.strip():
-        return [], "Gemini API key not set."
-
-    last_err = None
-
-    for _ in range(2):
-        try:
-            client = genai.Client(api_key=API_KEY)
-            resp = client.models.generate_content(
-                model=MODEL,
-                contents=prompt
-            )
-            raw_text = getattr(resp, "text", "") or ""
-            qs = parse_batch(raw_text)
-
-            if qs:
-                return qs, None
-
-            last_err = "AI format error or empty response."
-        except Exception as e:
-            last_err = str(e)
-            time.sleep(1)
-
-    return [], last_err
-
-
-# =================================================
 # POPUPS / FEEDBACK
 # =================================================
-def show_xp_popup():
-    popup_text = st.session_state.get("xp_popup_text", "").strip()
-    popup_kind = st.session_state.get("xp_popup_kind", "good")
-    popup_nonce = st.session_state.get("xp_popup_nonce", 0)
-
-    if not popup_text:
-        return
-
-    if popup_nonce != st.session_state.get("last_seen_xp_toast_nonce", -1):
-        try:
-            st.toast(popup_text.replace("\n", " • "))
-        except Exception:
-            pass
-        st.session_state.last_seen_xp_toast_nonce = popup_nonce
-
-    bg = "linear-gradient(180deg, #22c55e, #16a34a)" if popup_kind == "good" else "linear-gradient(180deg, #f59e0b, #d97706)"
-    border = "#166534" if popup_kind == "good" else "#92400e"
-
-    st.markdown(
-        f"""
-        <style>
-        @keyframes xpFloatFade-{popup_nonce} {{
-            0% {{
-                opacity: 0;
-                transform: translate(-50%, 18px) scale(0.92);
-            }}
-            12% {{
-                opacity: 1;
-                transform: translate(-50%, 0px) scale(1.02);
-            }}
-            75% {{
-                opacity: 1;
-                transform: translate(-50%, -8px) scale(1.0);
-            }}
-            100% {{
-                opacity: 0;
-                transform: translate(-50%, -28px) scale(0.96);
-            }}
-        }}
-
-        .xp-popup-{popup_nonce} {{
-            position: fixed;
-            left: 50%;
-            top: 92px;
-            transform: translateX(-50%);
-            z-index: 9999;
-            padding: 14px 22px;
-            border-radius: 18px;
-            color: white;
-            font-weight: 800;
-            font-size: 24px;
-            letter-spacing: 0.3px;
-            background: {bg};
-            border: 3px solid {border};
-            box-shadow: 0 14px 30px rgba(0,0,0,0.22);
-            animation: xpFloatFade-{popup_nonce} 2.2s ease-out forwards;
-            pointer-events: none;
-            text-align: center;
-            white-space: pre-line;
-        }}
-        </style>
-
-        <div class="xp-popup-{popup_nonce}">
-            {popup_text}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def show_challenge_result_popup():
-    popup_text = st.session_state.get("challenge_result_popup_text", "").strip()
-    popup_kind = st.session_state.get("challenge_result_popup_kind", "")
-    popup_nonce = st.session_state.get("challenge_result_popup_nonce", 0)
-
-    if not popup_text:
-        return
-
-    if popup_kind == "win":
-        bg = "linear-gradient(180deg, #22c55e, #15803d)"
-        border = "#14532d"
-        emoji = "🏆"
-    elif popup_kind == "loss":
-        bg = "linear-gradient(180deg, #ef4444, #b91c1c)"
-        border = "#7f1d1d"
-        emoji = "💀"
-    else:
-        bg = "linear-gradient(180deg, #f59e0b, #d97706)"
-        border = "#92400e"
-        emoji = "🤝"
-
-    st.markdown(
-        f"""
-        <style>
-        @keyframes challengeResultFade-{popup_nonce} {{
-            0% {{
-                opacity: 0;
-                transform: translate(-50%, -50%) scale(0.88);
-            }}
-            10% {{
-                opacity: 1;
-                transform: translate(-50%, -50%) scale(1.02);
-            }}
-            85% {{
-                opacity: 1;
-                transform: translate(-50%, -50%) scale(1.0);
-            }}
-            100% {{
-                opacity: 0;
-                transform: translate(-50%, -50%) scale(0.94);
-            }}
-        }}
-
-        .challenge-result-popup-{popup_nonce} {{
-            position: fixed;
-            left: 50%;
-            top: 50%;
-            transform: translate(-50%, -50%);
-            z-index: 10000;
-            min-width: 320px;
-            max-width: 90vw;
-            padding: 28px 26px;
-            border-radius: 24px;
-            color: white;
-            font-weight: 900;
-            text-align: center;
-            background: {bg};
-            border: 4px solid {border};
-            box-shadow: 0 24px 60px rgba(0,0,0,0.35);
-            animation: challengeResultFade-{popup_nonce} 3.2s ease-out forwards;
-            pointer-events: none;
-        }}
-
-        .challenge-result-popup-{popup_nonce} .icon {{
-            font-size: 54px;
-            line-height: 1;
-            margin-bottom: 10px;
-        }}
-
-        .challenge-result-popup-{popup_nonce} .text {{
-            font-size: 34px;
-            line-height: 1.15;
-            white-space: pre-line;
-        }}
-        </style>
-
-        <div class="challenge-result-popup-{popup_nonce}">
-            <div class="icon">{emoji}</div>
-            <div class="text">{popup_text}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.session_state.challenge_result_popup_text = ""
-    st.session_state.challenge_result_popup_kind = ""
-
-
 def render_combo_meter(streak_value: int):
     streak_value = max(0, int(streak_value))
 
@@ -2090,6 +1787,11 @@ except Exception as e:
 lb_sorted = sorted(lb, key=lambda r: safe_int(r.get("xp", 0)), reverse=True)
 
 player_id_lower = st.session_state.player_id.strip().lower()
+me = next(
+    (r for r in lb if str(r.get("name", "")).strip().lower() == player_id_lower),
+    {}
+)
+my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
 
 accepted_waiting_rows = [
     c for c in ch_all
@@ -2107,12 +1809,6 @@ if not any_quiz_mode_running() and accepted_waiting_rows:
         limit=None,
         key="challenge_start_countdown_refresh"
     )
-
-me = next(
-    (r for r in lb if str(r.get("name", "")).strip().lower() == player_id_lower),
-    {}
-)
-my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
 
 check_and_show_finished_challenge_result(ch_all, player_id_lower)
 if not is_teacher_user:
@@ -3357,4 +3053,4 @@ if st.button(
         else:
             st.session_state.processing_submission = False
             st.session_state.pending_auto_next = True
-            st.rerun()
+            st.rerun()    
