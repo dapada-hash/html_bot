@@ -98,7 +98,6 @@ STREAK_BONUS_XP = 20
 COOLDOWN_SECONDS = 1
 MAX_CHALLENGE_HISTORY_PER_COLUMN = 2
 RESULT_POPUP_WINDOW_SECONDS = 45
-CHALLENGE_START_EXPIRE_SECONDS = 5 * 60
 
 PERIOD_OPTIONS = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6","Period 7", "Period 8", "Other"]
 
@@ -309,112 +308,6 @@ def challenge_is_locked_for_ui(challenge_id: str) -> bool:
         st.session_state.get("challenge_mode", False)
         and str(st.session_state.get("challenge_id", "")).strip() == str(challenge_id).strip()
     )
-
-
-def challenge_deadline_ts(challenge_row: dict) -> float:
-    accepted_ts = parse_iso_utc_to_ts(str(challenge_row.get("accepted_utc", "")).strip())
-    if accepted_ts <= 0:
-        return 0.0
-    return accepted_ts + CHALLENGE_START_EXPIRE_SECONDS
-
-
-def challenge_seconds_left(challenge_row: dict) -> int:
-    deadline_ts = challenge_deadline_ts(challenge_row)
-    if deadline_ts <= 0:
-        return 0
-    return max(0, int(deadline_ts - time.time()))
-
-
-def challenge_waiting_for_start(challenge_row: dict) -> bool:
-    if str(challenge_row.get("status", "")).strip().lower() != "accepted":
-        return False
-
-    challenger_started = bool(str(challenge_row.get("challenger_started_utc", "")).strip())
-    opponent_started = bool(str(challenge_row.get("opponent_started_utc", "")).strip())
-
-    return not (challenger_started and opponent_started)
-
-
-def challenge_should_expire(challenge_row: dict) -> bool:
-    if not challenge_waiting_for_start(challenge_row):
-        return False
-
-    deadline_ts = challenge_deadline_ts(challenge_row)
-    if deadline_ts <= 0:
-        return False
-
-    return time.time() >= deadline_ts
-
-
-def expire_stale_challenges(challenges: list):
-    changed = False
-
-    for c in challenges:
-        status = str(c.get("status", "")).strip().lower()
-        cid = str(c.get("challenge_id", "")).strip()
-
-        if not cid:
-            continue
-
-        if status != "accepted":
-            continue
-
-        if not challenge_should_expire(c):
-            continue
-
-        challenger_started = bool(str(c.get("challenger_started_utc", "")).strip())
-        opponent_started = bool(str(c.get("opponent_started_utc", "")).strip())
-
-        missing_players = []
-        if not challenger_started:
-            missing_players.append(str(c.get("challenger", "")).strip())
-        if not opponent_started:
-            missing_players.append(str(c.get("opponent", "")).strip())
-
-        update_challenge(cid, {
-            "status": "expired",
-            "completed_utc": now_utc(),
-            "expired_utc": now_utc(),
-            "expire_reason": "start_timeout",
-            "missing_starters": missing_players,
-        })
-        changed = True
-
-    if changed:
-        clear_db_caches()
-        mark_db_data_stale()
-
-
-def mark_challenge_started(challenge_id: str, player_id_value: str):
-    snap = challenge_ref(challenge_id).get()
-    if not snap.exists:
-        raise ValueError("Challenge not found.")
-
-    row = snap.to_dict() or {}
-    status = str(row.get("status", "")).strip().lower()
-
-    if status == "expired":
-        raise ValueError("This challenge expired because one player did not start within 5 minutes.")
-
-    if status != "accepted":
-        raise ValueError("This challenge is not ready to start.")
-
-    if challenge_should_expire(row):
-        expire_stale_challenges([row])
-        raise ValueError("This challenge expired because one player did not start within 5 minutes.")
-
-    challenger_name = str(row.get("challenger", "")).strip().lower()
-    opponent_name = str(row.get("opponent", "")).strip().lower()
-    pid = str(player_id_value).strip().lower()
-
-    updates = {}
-    if pid == challenger_name and not str(row.get("challenger_started_utc", "")).strip():
-        updates["challenger_started_utc"] = now_utc()
-    elif pid == opponent_name and not str(row.get("opponent_started_utc", "")).strip():
-        updates["opponent_started_utc"] = now_utc()
-
-    if updates:
-        update_challenge(challenge_id, updates)
 
 
 def any_quiz_mode_running() -> bool:
@@ -1060,9 +953,7 @@ def create_challenge(challenger: str, opponent: str, domain: str, difficulty: st
     ref.set({
         "challenge_id": ref.id,
         "created_utc": now_utc(),
-        "accepted_utc": None,
         "completed_utc": None,
-        "expired_utc": None,
         "challenger": challenger,
         "opponent": opponent,
         "domain": domain,
@@ -1070,10 +961,6 @@ def create_challenge(challenger: str, opponent: str, domain: str, difficulty: st
         "status": "pending",
         "challenger_score": None,
         "opponent_score": None,
-        "challenger_started_utc": None,
-        "opponent_started_utc": None,
-        "expire_reason": None,
-        "missing_starters": [],
     })
     clear_db_caches()
     mark_db_data_stale()
@@ -1136,6 +1023,8 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
     clear_db_caches()
     mark_db_data_stale()
     return ref.id
+
+
 def end_challenge_event(event_id: str):
     snap = event_ref(event_id).get()
     if not snap.exists:
@@ -1386,8 +1275,309 @@ def check_and_show_finished_event_result(events: list, player_id: str, student_p
 
 
 # =================================================
+# QUESTION BANK API
+# =================================================
+def bank_size(topic: str, difficulty: str) -> int:
+    data = load_bank_from_firestore(topic, difficulty)
+    return len(data.get("questions", []) or [])
+
+
+def bank_last_updated(topic: str, difficulty: str):
+    data = load_bank_from_firestore(topic, difficulty)
+    return data.get("updated", None)
+
+
+def add_to_bank(topic: str, difficulty: str, questions: list):
+    append_questions_to_firestore_bank(topic, difficulty, questions)
+
+
+def get_bank(topic: str, difficulty: str):
+    data = load_bank_from_firestore(topic, difficulty)
+    return data.get("questions", []) or []
+
+
+# =================================================
+# GEMINI
+# =================================================
+def parse_batch(raw: str):
+    questions = []
+    chunks = raw.split("###")
+    for chunk in chunks:
+        try:
+            q = re.search(r"QUESTION:\s*(.*?)(?=\nA\))", chunk, re.S).group(1)
+            A = re.search(r"\nA\)\s*(.*)", chunk).group(1)
+            B = re.search(r"\nB\)\s*(.*)", chunk).group(1)
+            C = re.search(r"\nC\)\s*(.*)", chunk).group(1)
+            D = re.search(r"\nD\)\s*(.*)", chunk).group(1)
+            correct = re.search(r"CORRECT:\s*([ABCD])", chunk).group(1)
+            explanation = re.search(r"EXPLANATION:\s*(.*)", chunk, re.S).group(1)
+            questions.append({
+                "question": q.strip(),
+                "A": A.strip(),
+                "B": B.strip(),
+                "C": C.strip(),
+                "D": D.strip(),
+                "correct": correct.strip().upper(),
+                "explanation": explanation.strip(),
+            })
+        except Exception:
+            pass
+    return questions
+
+
+def fetch_questions_from_gemini(topic: str, difficulty: str, count: int):
+    prompt = f"""
+You are a Certiport HTML/CSS certification exam writer.
+Create exactly {count} questions for a classroom quiz game.
+
+DOMAIN: {topic}
+DIFFICULTY: {difficulty}
+
+IMPORTANT:
+- Mix the question styles across the batch.
+- Use these 3 styles:
+  1. Standard multiple choice
+  2. True/False
+  3. Ordering-as-multiple-choice
+
+QUESTION STYLE RULES:
+- At least some questions should be standard MCQ.
+- At least some questions should be True/False.
+- At least some questions should be ordering questions written as MCQ choices.
+- Do NOT use drag-and-drop.
+- Do NOT require free response.
+- Every question must still fit this exact answer model:
+  A, B, C, or D
+
+CONTENT RULES:
+- Focus strictly on this HTML/CSS domain.
+- Use Certiport-style HTML/CSS questions.
+- Include short HTML/CSS snippets when helpful.
+- Ask about syntax, structure, styling, selectors, accessibility, responsive design, semantics, links, forms, media, and troubleshooting.
+- Use realistic distractors.
+- Use backticks around code when useful.
+
+TRUE/FALSE RULES:
+- For True/False questions, still format the answers as:
+  A) True
+  B) False
+  C) Not used
+  D) Not used
+- Correct answer must be A or B only.
+
+ORDERING RULES:
+- For ordering questions, ask students to choose the correct sequence.
+- Example style:
+  QUESTION: Put the following steps in the correct order...
+  A) 1, 2, 3, 4
+  B) 1, 3, 2, 4
+  C) 2, 1, 3, 4
+  D) 3, 1, 2, 4
+- Do NOT ask students to manually rearrange items.
+- Ordering questions must still be answerable with A/B/C/D.
+
+FORMAT (MUST MATCH EXACTLY):
+- Each question separated by a line containing ONLY: ###
+- Each question uses EXACT labels:
+
+QUESTION: ...
+A) ...
+B) ...
+C) ...
+D) ...
+CORRECT: A/B/C/D
+EXPLANATION: ...
+
+No extra text before the first QUESTION:
+""".strip()
+
+    if not API_KEY.strip():
+        return [], "Gemini API key not set."
+
+    last_err = None
+
+    for _ in range(2):
+        try:
+            client = genai.Client(api_key=API_KEY)
+            resp = client.models.generate_content(
+                model=MODEL,
+                contents=prompt
+            )
+            raw_text = getattr(resp, "text", "") or ""
+            qs = parse_batch(raw_text)
+
+            if qs:
+                return qs, None
+
+            last_err = "AI format error or empty response."
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(1)
+
+    return [], last_err
+
+
+# =================================================
 # POPUPS / FEEDBACK
 # =================================================
+def show_xp_popup():
+    popup_text = st.session_state.get("xp_popup_text", "").strip()
+    popup_kind = st.session_state.get("xp_popup_kind", "good")
+    popup_nonce = st.session_state.get("xp_popup_nonce", 0)
+
+    if not popup_text:
+        return
+
+    if popup_nonce != st.session_state.get("last_seen_xp_toast_nonce", -1):
+        try:
+            st.toast(popup_text.replace("\n", " • "))
+        except Exception:
+            pass
+        st.session_state.last_seen_xp_toast_nonce = popup_nonce
+
+    bg = "linear-gradient(180deg, #22c55e, #16a34a)" if popup_kind == "good" else "linear-gradient(180deg, #f59e0b, #d97706)"
+    border = "#166534" if popup_kind == "good" else "#92400e"
+
+    st.markdown(
+        f"""
+        <style>
+        @keyframes xpFloatFade-{popup_nonce} {{
+            0% {{
+                opacity: 0;
+                transform: translate(-50%, 18px) scale(0.92);
+            }}
+            12% {{
+                opacity: 1;
+                transform: translate(-50%, 0px) scale(1.02);
+            }}
+            75% {{
+                opacity: 1;
+                transform: translate(-50%, -8px) scale(1.0);
+            }}
+            100% {{
+                opacity: 0;
+                transform: translate(-50%, -28px) scale(0.96);
+            }}
+        }}
+
+        .xp-popup-{popup_nonce} {{
+            position: fixed;
+            left: 50%;
+            top: 92px;
+            transform: translateX(-50%);
+            z-index: 9999;
+            padding: 14px 22px;
+            border-radius: 18px;
+            color: white;
+            font-weight: 800;
+            font-size: 24px;
+            letter-spacing: 0.3px;
+            background: {bg};
+            border: 3px solid {border};
+            box-shadow: 0 14px 30px rgba(0,0,0,0.22);
+            animation: xpFloatFade-{popup_nonce} 2.2s ease-out forwards;
+            pointer-events: none;
+            text-align: center;
+            white-space: pre-line;
+        }}
+        </style>
+
+        <div class="xp-popup-{popup_nonce}">
+            {popup_text}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def show_challenge_result_popup():
+    popup_text = st.session_state.get("challenge_result_popup_text", "").strip()
+    popup_kind = st.session_state.get("challenge_result_popup_kind", "")
+    popup_nonce = st.session_state.get("challenge_result_popup_nonce", 0)
+
+    if not popup_text:
+        return
+
+    if popup_kind == "win":
+        bg = "linear-gradient(180deg, #22c55e, #15803d)"
+        border = "#14532d"
+        emoji = "🏆"
+    elif popup_kind == "loss":
+        bg = "linear-gradient(180deg, #ef4444, #b91c1c)"
+        border = "#7f1d1d"
+        emoji = "💀"
+    else:
+        bg = "linear-gradient(180deg, #f59e0b, #d97706)"
+        border = "#92400e"
+        emoji = "🤝"
+
+    st.markdown(
+        f"""
+        <style>
+        @keyframes challengeResultFade-{popup_nonce} {{
+            0% {{
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(0.88);
+            }}
+            10% {{
+                opacity: 1;
+                transform: translate(-50%, -50%) scale(1.02);
+            }}
+            85% {{
+                opacity: 1;
+                transform: translate(-50%, -50%) scale(1.0);
+            }}
+            100% {{
+                opacity: 0;
+                transform: translate(-50%, -50%) scale(0.94);
+            }}
+        }}
+
+        .challenge-result-popup-{popup_nonce} {{
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10000;
+            min-width: 320px;
+            max-width: 90vw;
+            padding: 28px 26px;
+            border-radius: 24px;
+            color: white;
+            font-weight: 900;
+            text-align: center;
+            background: {bg};
+            border: 4px solid {border};
+            box-shadow: 0 24px 60px rgba(0,0,0,0.35);
+            animation: challengeResultFade-{popup_nonce} 3.2s ease-out forwards;
+            pointer-events: none;
+        }}
+
+        .challenge-result-popup-{popup_nonce} .icon {{
+            font-size: 54px;
+            line-height: 1;
+            margin-bottom: 10px;
+        }}
+
+        .challenge-result-popup-{popup_nonce} .text {{
+            font-size: 34px;
+            line-height: 1.15;
+            white-space: pre-line;
+        }}
+        </style>
+
+        <div class="challenge-result-popup-{popup_nonce}">
+            <div class="icon">{emoji}</div>
+            <div class="text">{popup_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.session_state.challenge_result_popup_text = ""
+    st.session_state.challenge_result_popup_kind = ""
+
+
 def render_combo_meter(streak_value: int):
     streak_value = max(0, int(streak_value))
 
@@ -1770,8 +1960,6 @@ else:
 # =================================================
 try:
     lb, ch_all = get_app_data()
-    expire_stale_challenges(ch_all)
-    lb, ch_all = get_app_data()
 except Exception as e:
     lb, ch_all = [], []
     st.warning("Could not load Firebase data.")
@@ -1792,23 +1980,6 @@ me = next(
     {}
 )
 my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
-
-accepted_waiting_rows = [
-    c for c in ch_all
-    if str(c.get("status", "")).strip().lower() == "accepted"
-    and (
-        str(c.get("challenger", "")).strip().lower() == player_id_lower
-        or str(c.get("opponent", "")).strip().lower() == player_id_lower
-    )
-    and challenge_waiting_for_start(c)
-]
-
-if not any_quiz_mode_running() and accepted_waiting_rows:
-    st_autorefresh(
-        interval=1000,
-        limit=None,
-        key="challenge_start_countdown_refresh"
-    )
 
 check_and_show_finished_challenge_result(ch_all, player_id_lower)
 if not is_teacher_user:
@@ -2092,20 +2263,8 @@ def load_next_question_for_current_mode():
 
 
 def start_challenge_attempt(challenge_row: dict):
+    status = str(challenge_row.get("status", "")).strip().lower()
     cid = str(challenge_row.get("challenge_id", "")).strip()
-
-    if not cid:
-        raise ValueError("Challenge ID is missing.")
-
-    fresh_snap = challenge_ref(cid).get()
-    if not fresh_snap.exists:
-        raise ValueError("Challenge not found.")
-
-    fresh_row = fresh_snap.to_dict() or {}
-    status = str(fresh_row.get("status", "")).strip().lower()
-
-    if status == "expired":
-        raise ValueError("This challenge expired because one player did not start within 5 minutes.")
 
     if status != "accepted":
         raise ValueError("This challenge cannot start until the opponent accepts it.")
@@ -2113,15 +2272,13 @@ def start_challenge_attempt(challenge_row: dict):
     if any_quiz_mode_running():
         raise ValueError("A quiz is already in progress.")
 
-    mark_challenge_started(cid, st.session_state.player_id)
-
     st.session_state.challenge_mode = True
     st.session_state.challenge_id = cid
     st.session_state.challenge_count = 0
     st.session_state.challenge_correct = 0
-    st.session_state.active_domain = fresh_row["domain"]
-    st.session_state.active_difficulty = fresh_row["difficulty"]
-    load_question(fresh_row["domain"], fresh_row["difficulty"])
+    st.session_state.active_domain = challenge_row["domain"]
+    st.session_state.active_difficulty = challenge_row["difficulty"]
+    load_question(challenge_row["domain"], challenge_row["difficulty"])
 
 
 def start_event_attempt(event_row: dict):
@@ -2199,13 +2356,13 @@ st.caption("New incoming challenges appear automatically while you are not insid
 incoming = [
     c for c in ch_all
     if str(c.get("opponent", "")).strip().lower() == player_id_lower
-    and c.get("status") in ("pending", "accepted", "done", "expired")
+    and c.get("status") in ("pending", "accepted", "done")
 ]
 
 outgoing = [
     c for c in ch_all
     if str(c.get("challenger", "")).strip().lower() == player_id_lower
-    and c.get("status") in ("pending", "accepted", "done", "expired")
+    and c.get("status") in ("pending", "accepted", "done")
 ]
 
 incoming = sorted(incoming, key=challenge_sort_key, reverse=True)[:MAX_CHALLENGE_HISTORY_PER_COLUMN]
@@ -2221,30 +2378,15 @@ with left:
         for c in incoming:
             already_completed = my_challenge_already_completed(c, player_id_lower)
             challenge_done = c.get("status") == "done"
-            challenge_expired = str(c.get("status", "")).strip().lower() == "expired"
             status = str(c.get("status", "")).strip().lower()
             challenge_locked = challenge_is_locked_for_ui(c["challenge_id"])
             any_running = any_quiz_mode_running()
 
-            status_line = f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
+            st.write(
+                f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
+            )
 
-            if status == "accepted" and challenge_waiting_for_start(c):
-                secs_left = challenge_seconds_left(c)
-                mm = secs_left // 60
-                ss = secs_left % 60
-                waiting_for = []
-                if not str(c.get("challenger_started_utc", "")).strip():
-                    waiting_for.append(c["challenger"])
-                if not str(c.get("opponent_started_utc", "")).strip():
-                    waiting_for.append(c["opponent"])
-                who_text = ", ".join(waiting_for) if waiting_for else "both players"
-                status_line += f" • ⏳ Start expires in **{mm:02d}:{ss:02d}** • Waiting for: **{who_text}**"
-
-            st.write(status_line)
-
-            if challenge_expired:
-                st.button("⌛ Expired", key=f"incoming_expired_{c['challenge_id']}", disabled=True)
-            elif challenge_done:
+            if challenge_done:
                 st.button("✅ Challenge Over", key=f"incoming_done_{c['challenge_id']}", disabled=True)
             elif already_completed:
                 st.button("✅ Already Completed", key=f"incoming_completed_{c['challenge_id']}", disabled=True)
@@ -2255,15 +2397,8 @@ with left:
             elif status == "pending":
                 if st.button(f"Accept {c['challenge_id']}", key=f"accept_{c['challenge_id']}", disabled=any_running):
                     try:
-                        accepted_now = now_utc()
-                        update_challenge(c["challenge_id"], {
-                            "status": "accepted",
-                            "accepted_utc": accepted_now,
-                            "opponent_started_utc": accepted_now,
-                        })
+                        update_challenge(c["challenge_id"], {"status": "accepted"})
                         c["status"] = "accepted"
-                        c["accepted_utc"] = accepted_now
-                        c["opponent_started_utc"] = accepted_now
                         start_challenge_attempt(c)
                         st.success("Challenge accepted!")
                         st.rerun()
@@ -2288,30 +2423,15 @@ with right:
         for c in outgoing:
             already_completed = my_challenge_already_completed(c, player_id_lower)
             challenge_done = c.get("status") == "done"
-            challenge_expired = str(c.get("status", "")).strip().lower() == "expired"
             status = str(c.get("status", "")).strip().lower()
             challenge_locked = challenge_is_locked_for_ui(c["challenge_id"])
             any_running = any_quiz_mode_running()
 
-            status_line = f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
+            st.write(
+                f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
+            )
 
-            if status == "accepted" and challenge_waiting_for_start(c):
-                secs_left = challenge_seconds_left(c)
-                mm = secs_left // 60
-                ss = secs_left % 60
-                waiting_for = []
-                if not str(c.get("challenger_started_utc", "")).strip():
-                    waiting_for.append(c["challenger"])
-                if not str(c.get("opponent_started_utc", "")).strip():
-                    waiting_for.append(c["opponent"])
-                who_text = ", ".join(waiting_for) if waiting_for else "both players"
-                status_line += f" • ⏳ Start expires in **{mm:02d}:{ss:02d}** • Waiting for: **{who_text}**"
-
-            st.write(status_line)
-
-            if challenge_expired:
-                st.button("⌛ Expired", key=f"start_expired_{c['challenge_id']}", disabled=True)
-            elif challenge_done:
+            if challenge_done:
                 st.button("✅ Challenge Over", key=f"start_done_{c['challenge_id']}", disabled=True)
             elif already_completed:
                 st.button("✅ Already Completed", key=f"start_completed_{c['challenge_id']}", disabled=True)
@@ -2889,30 +3009,6 @@ if st.button(
         # -----------------------------
         if st.session_state.challenge_mode and st.session_state.challenge_id:
             cid = st.session_state.challenge_id
-
-            try:
-                live_snap = challenge_ref(cid).get()
-                live_row = live_snap.to_dict() if live_snap.exists else None
-
-                if live_row and str(live_row.get("status", "")).strip().lower() == "accepted" and challenge_should_expire(live_row):
-                    expire_stale_challenges([live_row])
-
-                live_snap = challenge_ref(cid).get()
-                live_row = live_snap.to_dict() if live_snap.exists else None
-
-                if not live_row or str(live_row.get("status", "")).strip().lower() == "expired":
-                    st.session_state.challenge_mode = False
-                    st.session_state.challenge_id = None
-                    st.session_state.challenge_count = 0
-                    st.session_state.challenge_correct = 0
-                    st.session_state.active_domain = None
-                    st.session_state.active_difficulty = None
-                    st.session_state.processing_submission = False
-                    st.warning("This challenge expired because one player did not start within 5 minutes.")
-                    st.rerun()
-            except Exception:
-                pass
-
             st.session_state.challenge_count += 1
             if correct:
                 st.session_state.challenge_correct += 1
@@ -3053,4 +3149,4 @@ if st.button(
         else:
             st.session_state.processing_submission = False
             st.session_state.pending_auto_next = True
-            st.rerun()    
+            st.rerun()
