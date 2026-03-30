@@ -100,7 +100,7 @@ MAX_CHALLENGE_HISTORY_PER_COLUMN = 2
 RESULT_POPUP_WINDOW_SECONDS = 45
 CHALLENGE_START_EXPIRE_SECONDS = 5 * 60
 
-PERIOD_OPTIONS = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6","Period 7", "Period 8", "Other"]
+PERIOD_OPTIONS = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Period 7", "Period 8", "Other"]
 
 # =================================================
 # COOKIES
@@ -318,31 +318,12 @@ def challenge_deadline_ts(challenge_row: dict) -> float:
     return accepted_ts + CHALLENGE_START_EXPIRE_SECONDS
 
 
-def challenge_seconds_left(challenge_row: dict) -> int:
-    deadline_ts = challenge_deadline_ts(challenge_row)
-    if deadline_ts <= 0:
-        return 0
-    return max(0, int(deadline_ts - time.time()))
-
-
-def challenge_waiting_for_start(challenge_row: dict) -> bool:
+def challenge_should_expire(challenge_row: dict) -> bool:
     if str(challenge_row.get("status", "")).strip().lower() != "accepted":
         return False
-
-    challenger_started = bool(str(challenge_row.get("challenger_started_utc", "")).strip())
-    opponent_started = bool(str(challenge_row.get("opponent_started_utc", "")).strip())
-
-    return not (challenger_started and opponent_started)
-
-
-def challenge_should_expire(challenge_row: dict) -> bool:
-    if not challenge_waiting_for_start(challenge_row):
-        return False
-
     deadline_ts = challenge_deadline_ts(challenge_row)
     if deadline_ts <= 0:
         return False
-
     return time.time() >= deadline_ts
 
 
@@ -353,10 +334,7 @@ def expire_stale_challenges(challenges: list):
         status = str(c.get("status", "")).strip().lower()
         cid = str(c.get("challenge_id", "")).strip()
 
-        if not cid:
-            continue
-
-        if status != "accepted":
+        if not cid or status != "accepted":
             continue
 
         if not challenge_should_expire(c):
@@ -364,6 +342,9 @@ def expire_stale_challenges(challenges: list):
 
         challenger_started = bool(str(c.get("challenger_started_utc", "")).strip())
         opponent_started = bool(str(c.get("opponent_started_utc", "")).strip())
+
+        if challenger_started and opponent_started:
+            continue
 
         missing_players = []
         if not challenger_started:
@@ -726,7 +707,7 @@ def load_players():
     return rows
 
 
-@st.cache_data(ttl=1)
+@st.cache_data(ttl=5)
 def load_challenges():
     docs = db().collection("challenges").stream()
     rows = []
@@ -800,15 +781,13 @@ def get_app_data(force_refresh: bool = False):
         force_refresh
         or not st.session_state.leaderboard_cache
         or not st.session_state.challenge_cache
-        or now_ts - st.session_state.last_db_sync > 2
+        or now_ts - st.session_state.last_db_sync > 5
     ):
         st.session_state.leaderboard_cache = load_players()
         st.session_state.challenge_cache = load_challenges()
         st.session_state.last_db_sync = now_ts
 
     return st.session_state.leaderboard_cache, st.session_state.challenge_cache
-
-
 # =================================================
 # STUDENT PROFILE HELPERS
 # =================================================
@@ -956,139 +935,6 @@ def delete_student_profile_and_auth(uid: str):
     mark_db_data_stale()
 
 
-# =================================================
-# FIRESTORE WRITE HELPERS
-# =================================================
-def upsert_player(name: str, period: str):
-    name = name.strip()
-    if not name:
-        return
-
-    ref = player_ref(name)
-    snap = ref.get()
-
-    if snap.exists:
-        data = snap.to_dict() or {}
-        ref.set({
-            "name": name,
-            "period": period,
-            "xp": safe_int(data.get("xp", 0)),
-            "wins": safe_int(data.get("wins", 0)),
-            "losses": safe_int(data.get("losses", 0)),
-            "streak": safe_int(data.get("streak", 0)),
-            "best_streak": safe_int(data.get("best_streak", 0)),
-            "last_seen_utc": now_utc(),
-        }, merge=True)
-    else:
-        ref.set({
-            "name": name,
-            "period": period,
-            "xp": 0,
-            "wins": 0,
-            "losses": 0,
-            "streak": 0,
-            "best_streak": 0,
-            "last_seen_utc": now_utc(),
-        })
-
-    clear_db_caches()
-    mark_db_data_stale()
-
-
-def add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=0, loss_delta=0):
-    name = name.strip()
-    if not name:
-        return
-
-    ref = player_ref(name)
-    snap = ref.get()
-
-    if not snap.exists:
-        upsert_player(name, "Other")
-        snap = ref.get()
-
-    data = snap.to_dict() or {}
-
-    xp = safe_int(data.get("xp", 0)) + int(delta_xp)
-    wins = safe_int(data.get("wins", 0)) + int(win_delta)
-    losses = safe_int(data.get("losses", 0)) + int(loss_delta)
-
-    streak = safe_int(data.get("streak", 0))
-    best = safe_int(data.get("best_streak", 0))
-
-    if streak_delta == -999:
-        streak = 0
-    else:
-        streak = max(0, streak + int(streak_delta))
-        best = max(best, streak)
-
-    ref.set({
-        "name": name,
-        "period": data.get("period", "Other"),
-        "xp": xp,
-        "wins": wins,
-        "losses": losses,
-        "streak": streak,
-        "best_streak": best,
-        "last_seen_utc": now_utc(),
-    }, merge=True)
-
-    clear_db_caches()
-    mark_db_data_stale()
-
-
-def log_session(name: str, period: str, score: int, answered: int):
-    accuracy = round((score / answered) * 100, 2) if answered else 0.0
-    session_ref().set({
-        "timestamp_utc": now_utc(),
-        "name": name,
-        "period": period,
-        "score": int(score),
-        "answered": int(answered),
-        "accuracy": accuracy,
-    })
-    clear_db_caches()
-
-
-def create_challenge(challenger: str, opponent: str, domain: str, difficulty: str):
-    existing = load_challenges()
-
-    if player_has_active_challenge(challenger, existing):
-        raise ValueError(f"{challenger} already has an active challenge.")
-
-    if player_has_active_challenge(opponent, existing):
-        raise ValueError(f"{opponent} already has an active challenge.")
-
-    ref = db().collection("challenges").document()
-    ref.set({
-        "challenge_id": ref.id,
-        "created_utc": now_utc(),
-        "accepted_utc": None,
-        "completed_utc": None,
-        "expired_utc": None,
-        "challenger": challenger,
-        "opponent": opponent,
-        "domain": domain,
-        "difficulty": difficulty,
-        "status": "pending",
-        "challenger_score": None,
-        "opponent_score": None,
-        "challenger_started_utc": None,
-        "opponent_started_utc": None,
-        "expire_reason": None,
-        "missing_starters": [],
-    })
-    clear_db_caches()
-    mark_db_data_stale()
-    return ref.id
-
-
-def update_challenge(cid: str, updates: dict):
-    challenge_ref(cid).set(updates, merge=True)
-    clear_db_caches()
-    mark_db_data_stale()
-
-
 def create_challenge_event(title: str, domain: str, difficulty: str, periods: list, question_count: int):
     title = str(title).strip()
     periods = [p for p in periods if str(p).strip()]
@@ -1139,6 +985,8 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
     clear_db_caches()
     mark_db_data_stale()
     return ref.id
+
+
 def end_challenge_event(event_id: str):
     snap = event_ref(event_id).get()
     if not snap.exists:
@@ -2097,22 +1945,6 @@ me = next(
 )
 my_has_active_challenge = player_has_active_challenge(st.session_state.player_id, ch_all)
 
-accepted_waiting_rows = [
-    c for c in ch_all
-    if str(c.get("status", "")).strip().lower() == "accepted"
-    and (
-        str(c.get("challenger", "")).strip().lower() == player_id_lower
-        or str(c.get("opponent", "")).strip().lower() == player_id_lower
-    )
-]
-
-if not any_quiz_mode_running() and accepted_waiting_rows:
-    st_autorefresh(
-        interval=1000,
-        limit=None,
-        key="challenge_start_countdown_refresh"
-    )
-
 check_and_show_finished_challenge_result(ch_all, player_id_lower)
 if not is_teacher_user:
     check_and_show_finished_event_result(
@@ -2422,20 +2254,13 @@ def start_challenge_attempt(challenge_row: dict):
 
     mark_challenge_started(cid, st.session_state.player_id)
 
-    refreshed_snap = challenge_ref(cid).get()
-    refreshed_row = refreshed_snap.to_dict() or {}
-
-    if challenge_should_expire(refreshed_row):
-        expire_stale_challenges([refreshed_row])
-        raise ValueError("This challenge expired because one player did not start within 5 minutes.")
-
     st.session_state.challenge_mode = True
     st.session_state.challenge_id = cid
     st.session_state.challenge_count = 0
     st.session_state.challenge_correct = 0
-    st.session_state.active_domain = refreshed_row["domain"]
-    st.session_state.active_difficulty = refreshed_row["difficulty"]
-    load_question(refreshed_row["domain"], refreshed_row["difficulty"])
+    st.session_state.active_domain = fresh_row["domain"]
+    st.session_state.active_difficulty = fresh_row["difficulty"]
+    load_question(fresh_row["domain"], fresh_row["difficulty"])
 
 
 def start_event_attempt(event_row: dict):
@@ -2508,7 +2333,7 @@ st.divider()
 # CHALLENGE INBOX / OUTBOX
 # =================================================
 st.markdown("## 📩 Challenges")
-st.caption("New incoming challenges appear automatically while you are not inside an active quiz.")
+st.caption("Pending challenges expire automatically 5 minutes after acceptance if both players do not start.")
 
 incoming = [
     c for c in ch_all
@@ -2540,23 +2365,9 @@ with left:
             challenge_locked = challenge_is_locked_for_ui(c["challenge_id"])
             any_running = any_quiz_mode_running()
 
-            status_line = f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
-
-            if status == "accepted":
-                secs_left = challenge_seconds_left(c)
-                mm = secs_left // 60
-                ss = secs_left % 60
-
-                waiting_for = []
-                if not str(c.get("challenger_started_utc", "")).strip():
-                    waiting_for.append(c["challenger"])
-                if not str(c.get("opponent_started_utc", "")).strip():
-                    waiting_for.append(c["opponent"])
-
-                who_text = ", ".join(waiting_for) if waiting_for else "none"
-                status_line += f" • ⏳ **{mm:02d}:{ss:02d}** • Waiting for: **{who_text}**"
-
-            st.write(status_line)
+            st.write(
+                f"**{c['challenger']}** challenged you • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
+            )
 
             if challenge_expired:
                 st.button("⌛ Expired", key=f"incoming_expired_{c['challenge_id']}", disabled=True)
@@ -2606,23 +2417,9 @@ with right:
             challenge_locked = challenge_is_locked_for_ui(c["challenge_id"])
             any_running = any_quiz_mode_running()
 
-            status_line = f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
-
-            if status == "accepted":
-                secs_left = challenge_seconds_left(c)
-                mm = secs_left // 60
-                ss = secs_left % 60
-
-                waiting_for = []
-                if not str(c.get("challenger_started_utc", "")).strip():
-                    waiting_for.append(c["challenger"])
-                if not str(c.get("opponent_started_utc", "")).strip():
-                    waiting_for.append(c["opponent"])
-
-                who_text = ", ".join(waiting_for) if waiting_for else "none"
-                status_line += f" • ⏳ **{mm:02d}:{ss:02d}** • Waiting for: **{who_text}**"
-
-            st.write(status_line)
+            st.write(
+                f"To **{c['opponent']}** • **{c['domain']}** ({c['difficulty']}) • `{c['status']}`"
+            )
 
             if challenge_expired:
                 st.button("⌛ Expired", key=f"start_expired_{c['challenge_id']}", disabled=True)
