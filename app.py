@@ -321,9 +321,17 @@ def challenge_deadline_ts(challenge_row: dict) -> float:
 def challenge_should_expire(challenge_row: dict) -> bool:
     if str(challenge_row.get("status", "")).strip().lower() != "accepted":
         return False
+
     deadline_ts = challenge_deadline_ts(challenge_row)
     if deadline_ts <= 0:
         return False
+
+    challenger_started = bool(str(challenge_row.get("challenger_started_utc", "")).strip())
+    opponent_started = bool(str(challenge_row.get("opponent_started_utc", "")).strip())
+
+    if challenger_started and opponent_started:
+        return False
+
     return time.time() >= deadline_ts
 
 
@@ -342,9 +350,6 @@ def expire_stale_challenges(challenges: list):
 
         challenger_started = bool(str(c.get("challenger_started_utc", "")).strip())
         opponent_started = bool(str(c.get("opponent_started_utc", "")).strip())
-
-        if challenger_started and opponent_started:
-            continue
 
         missing_players = []
         if not challenger_started:
@@ -788,6 +793,49 @@ def get_app_data(force_refresh: bool = False):
         st.session_state.last_db_sync = now_ts
 
     return st.session_state.leaderboard_cache, st.session_state.challenge_cache
+
+
+# =================================================
+# PLAYER UPSERT
+# =================================================
+def upsert_player(name: str, period: str):
+    name = str(name).strip()
+    period = str(period).strip() or "Other"
+
+    if not name:
+        return
+
+    ref = player_ref(name)
+    snap = ref.get()
+
+    if snap.exists:
+        data = snap.to_dict() or {}
+        ref.set({
+            "name": name,
+            "period": period,
+            "xp": safe_int(data.get("xp", 0)),
+            "wins": safe_int(data.get("wins", 0)),
+            "losses": safe_int(data.get("losses", 0)),
+            "streak": safe_int(data.get("streak", 0)),
+            "best_streak": safe_int(data.get("best_streak", 0)),
+            "last_seen_utc": now_utc(),
+        }, merge=True)
+    else:
+        ref.set({
+            "name": name,
+            "period": period,
+            "xp": 0,
+            "wins": 0,
+            "losses": 0,
+            "streak": 0,
+            "best_streak": 0,
+            "last_seen_utc": now_utc(),
+        })
+
+    clear_db_caches()
+    mark_db_data_stale()
+
+
 # =================================================
 # STUDENT PROFILE HELPERS
 # =================================================
@@ -935,6 +983,103 @@ def delete_student_profile_and_auth(uid: str):
     mark_db_data_stale()
 
 
+# =================================================
+# FIRESTORE WRITE HELPERS
+# =================================================
+def add_xp_and_streak(name: str, delta_xp: int, streak_delta: int, win_delta=0, loss_delta=0):
+    name = name.strip()
+    if not name:
+        return
+
+    ref = player_ref(name)
+    snap = ref.get()
+
+    if not snap.exists:
+        upsert_player(name, "Other")
+        snap = ref.get()
+
+    data = snap.to_dict() or {}
+
+    xp = safe_int(data.get("xp", 0)) + int(delta_xp)
+    wins = safe_int(data.get("wins", 0)) + int(win_delta)
+    losses = safe_int(data.get("losses", 0)) + int(loss_delta)
+
+    streak = safe_int(data.get("streak", 0))
+    best = safe_int(data.get("best_streak", 0))
+
+    if streak_delta == -999:
+        streak = 0
+    else:
+        streak = max(0, streak + int(streak_delta))
+        best = max(best, streak)
+
+    ref.set({
+        "name": name,
+        "period": data.get("period", "Other"),
+        "xp": xp,
+        "wins": wins,
+        "losses": losses,
+        "streak": streak,
+        "best_streak": best,
+        "last_seen_utc": now_utc(),
+    }, merge=True)
+
+    clear_db_caches()
+    mark_db_data_stale()
+
+
+def log_session(name: str, period: str, score: int, answered: int):
+    accuracy = round((score / answered) * 100, 2) if answered else 0.0
+    session_ref().set({
+        "timestamp_utc": now_utc(),
+        "name": name,
+        "period": period,
+        "score": int(score),
+        "answered": int(answered),
+        "accuracy": accuracy,
+    })
+    clear_db_caches()
+
+
+def create_challenge(challenger: str, opponent: str, domain: str, difficulty: str):
+    existing = load_challenges()
+
+    if player_has_active_challenge(challenger, existing):
+        raise ValueError(f"{challenger} already has an active challenge.")
+
+    if player_has_active_challenge(opponent, existing):
+        raise ValueError(f"{opponent} already has an active challenge.")
+
+    ref = db().collection("challenges").document()
+    ref.set({
+        "challenge_id": ref.id,
+        "created_utc": now_utc(),
+        "accepted_utc": None,
+        "completed_utc": None,
+        "expired_utc": None,
+        "challenger": challenger,
+        "opponent": opponent,
+        "domain": domain,
+        "difficulty": difficulty,
+        "status": "pending",
+        "challenger_score": None,
+        "opponent_score": None,
+        "challenger_started_utc": None,
+        "opponent_started_utc": None,
+        "expire_reason": None,
+        "missing_starters": [],
+    })
+    clear_db_caches()
+    mark_db_data_stale()
+    return ref.id
+
+
+def update_challenge(cid: str, updates: dict):
+    challenge_ref(cid).set(updates, merge=True)
+    clear_db_caches()
+    mark_db_data_stale()
+
+
 def create_challenge_event(title: str, domain: str, difficulty: str, periods: list, question_count: int):
     title = str(title).strip()
     periods = [p for p in periods if str(p).strip()]
@@ -985,8 +1130,6 @@ def create_challenge_event(title: str, domain: str, difficulty: str, periods: li
     clear_db_caches()
     mark_db_data_stale()
     return ref.id
-
-
 def end_challenge_event(event_id: str):
     snap = event_ref(event_id).get()
     if not snap.exists:
@@ -2333,7 +2476,7 @@ st.divider()
 # CHALLENGE INBOX / OUTBOX
 # =================================================
 st.markdown("## 📩 Challenges")
-st.caption("Pending challenges expire automatically 5 minutes after acceptance if both players do not start.")
+st.caption("Challenges expire automatically 5 minutes after acceptance if one player does not start.")
 
 incoming = [
     c for c in ch_all
